@@ -10,7 +10,7 @@
 | CON-2 | Each instance is a **"Modulith"** (modular monolith), not microservices; the system runs as **multiple cooperating instances across multiple servers**. | Sponsor |
 | CON-3 | **PostgreSQL** hosts/persists all internal data structures (config, state, audit, suspense); declarative rule bodies are stored as `JSONB`. | Sponsor |
 | CON-4 | **Performance and memory efficiency are the top priority**; streaming, bounded memory. | Sponsor |
-| CON-5 | v1 acquires input **locally** and via **remote fetch over FTP/SFTP/FTPS**; other transports (S3/Kafka/streaming) are out of scope. | Sponsor |
+| CON-5 | v1 acquires input **locally** and via **remote fetch over SFTP/FTPS**; other transports (S3/Kafka/streaming) are out of scope. | Sponsor |
 | CON-6 | v1 must support **ASN.1, JSON, XML, DSV, and fixed-position** input formats. | Sponsor |
 | CON-7 | Transformations must be **configurable/declarative (e.g. JSON)**. | Sponsor |
 | CON-8 | **v1** supports **RDBMS (e.g. PostgreSQL)** as a load/distribution target — a client-owned destination alongside file outputs (originally planned for v2, pulled forward). | Sponsor |
@@ -39,7 +39,7 @@
 | ASM-4 | **PostgreSQL is available, secured, sized, and administered** (backup/restore, HA failover, connection pooling) by the client's platform/DBA team. | Engine cannot persist state/audit. |
 | ASM-5 | Sensitive-data handling (masking, encryption-at-rest) is **partly delegated** to the deployment — OS/volume-level encryption under the PostgreSQL data directory in v1. | Additional in-engine controls needed. |
 | ASM-6 | Downstream consumers read from **local file destinations** and manage their own pickup in v1. | Additional delivery transport needed. |
-| ASM-7 | Clocks on host are reliable for time-window correlation and audit timestamps. | Correlation windows unreliable. |
+| ASM-7 | Correlation/aggregation **grouping and window assignment use the record's own event-start-date/time** (`BR-COR-010`); host wall-clock time is used only for **grace-timeouts** and audit timestamps, and is NTP-synchronised (`ASM-3b`). Source records are assumed to carry a usable, parseable **event start timestamp** with enough timezone information to normalise (`BR-TRN-010`). | If records lack a reliable event timestamp, windowing/effective-dating fall back to arrival time — less accurate grouping; more tuning. |
 | ASM-8 | Remote fetch/archive **hosts, credentials/keys, and paths** are provided, reachable, and stable. | Fetch/archive fails; input starves or offload stalls. |
 | ASM-9 | Remote hosts expose files **atomically/completely** (or a stability/marker signal) so partial remote files are not fetched. | Corrupt downloads; more suspense. |
 | ASM-10 | Disk on the engine host is sized for **local input, done, and pre-offload archive** staging. | Archiving/fetch stalls on full disk. |
@@ -47,6 +47,9 @@
 | ASM-12 | The **state database and the shared file area are backed up as a coordinated pair**, and a restore is followed by the startup consistency check (`BR-NFR-017`). | Restore leaves DB and disk diverged; manual reconciliation needed. |
 | ASM-13 | Where an RDBMS destination is configured, the **target table and its schema are provided and maintained by the client**; the engine writes per the configured mapping and does not alter the client's schema. | Load fails to suspense on schema drift (`BR-DST-014`). |
 | ASM-14 | To replay an **archived** file the **operator re-adds it to disk manually** (the engine does not auto-retrieve from the archive); and where a replay is directed to **file destinations** with dedup-override, the **downstream partner is responsible for handling duplicates/superseding** per the replay marker, coordinated by the operator. | Replay of a pruned file is blocked until re-added; a downstream may double-ingest if the marker is ignored (`BR-ERR-009`). |
+| ASM-15 | Where a downstream file consumer wants **confirmed** delivery (`BR-DST-016`), it provides a callback/receipt convention the engine can call or watch; absent that, delivery = *atomically written to the destination directory* (`ASM-6`). | Completeness proof stops at *written*, not *received*, for that destination. |
+| ASM-16 *(v2)* | For **cross-source correlation** (`BR-COR-009`, **v2**), the feeds participating in a Correlation Group carry a **common, normalisable correlation key** for the same logical event. In **v1** (single-source correlation) this does not apply. | Cross-feed legs cannot be joined in v2; they emit as separate partials. |
+| ASM-17 | v1 is sized for a **small-to-medium operator**, whose aggregate write rate fits a **single PostgreSQL primary** with partitioning/pooling (`BR-NFR-024`). | Tier-1 volumes require the v2/future write-scaling work (`R30`) before onboarding. |
 
 ## 9.3 Dependencies
 
@@ -60,7 +63,7 @@
 | DEP-3 | ASN.1 **schema definitions** for each ASN.1 source. | Data/config input. |
 | DEP-4 | Reference data feeds for **enrichment** lookups. | Data input (may itself be mediated). |
 | DEP-5 | Host **file system** & directory conventions (input, done, archive staging) agreed with source-system owners. | Integration contract. |
-| DEP-6 | **Remote FTP/SFTP/FTPS hosts** (for fetch and archive offload) + credentials/keys managed via secrets. | Runtime, integration. |
+| DEP-6 | **Remote SFTP/FTPS hosts** (for fetch and archive offload) + credentials/keys managed via secrets. | Runtime, integration. |
 | DEP-7 | Target **RDBMS load destination (PostgreSQL)** availability & schema, where a deployment configures an RDBMS destination — a **client-owned, separate database/role** from the engine's own state store (`DEP-1`), though it MAY be the same PostgreSQL technology/cluster. | Runtime (v1), optional per deployment. |
 
 ## 9.4 Key risks
@@ -111,6 +114,10 @@ rectangle "R6 Suspense backlog\ngrows unmanaged" as R6 #E6F4EA
 | R27 | **Target schema drift** (column removed/renamed/retyped) breaks RDBMS load | Load stalls; records suspended | Validate mapping at publish + runtime mismatch → suspense, not crash (BR-DST-014); alert (BR-OPS-008); client owns schema (ASM-13) |
 | R28 | **RDBMS load overwhelms the client's target DB** (large batches, long transactions, connection storm, lock contention) | Target-DB slowdown; complaints | Bounded batch size/commit interval, pooled connections, optional rate limiting (BR-DST-015); store-and-forward absorbs target slowness (BR-DST-010) |
 | R29 | **Replayed file re-ingested as a duplicate** by a downstream partner (dedup-override output to a file destination) | Double-counting downstream | Replay/adjustment marker (BR-DST-012); RDBMS idempotent upsert (BR-DST-013); operator↔partner coordination (ASM-14) |
+| R30 | **Single PostgreSQL primary write ceiling** reached as volumes approach tier-1 (dedup writes, collation, claims, audit all commit to one primary) | Throughput plateau; cannot scale further by adding instances | v1: partitioning + partition-drop expiry, pooling, streaming-mode feeds, dedup read-path pre-filter (BR-NFR-024/025); **v2/future**: partition/shard state or external dedup store ([[10-roadmap]]) — accepted limitation for the small-to-medium v1 target |
+| R31 | **Loss on DB failover** because v1 replication may be asynchronous | Window of committed state not yet replicated | **v1:** no *silent* loss — the failed-over state is made good by **disk-marker startup reconciliation** (BR-NFR-016/017), degrading to bounded re-work. **v2:** synchronous-commit local standby → **RPO=0** (BR-NFR-018) |
+| R32 | **Uncoordinated scheduled/singleton jobs** across instances (fetch/archive/liveness) → connection storms, duplicate fetch, redundant runs | Source-system overload; wasted work | **v1:** jobs on a **nominated instance** + idempotent backstops (already-fetched guard BR-RMT-005, verify-before-prune BR-ARC-006) — wasteful at worst, never lossy. **v2:** Scheduled-Job Lease with auto-failover (BR-HA-010, BR-RMT-012) |
+| R33 | **Wrong-version decode** — a file carrying old-format events decoded under the current format after a schema change | Mis-decoded records; suspense/mis-billing | **v1:** operator-timed format cutover via publish (BR-CFG-008); in-flight files continue under their started version (BR-CFG-007). **v2:** automatic **event-time-driven format selection** (BR-DEC-012) removes the timing burden |
 
 ## 9.5 Open questions (to resolve before/into design)
 
@@ -128,3 +135,8 @@ rectangle "R6 Suspense backlog\ngrows unmanaged" as R6 #E6F4EA
 11. **Poison-file** max-attempts threshold and whether the default action is record-isolation or whole-file quarantine (`BR-COL-017`).
 12. **Backup/restore** approach for the coordinated DB + file-area pair, including PITR alignment and how far behind the DB may lag the disk (`BR-NFR-017`, `ASM-12`).
 13. **RDBMS load targets** per client: which target tables/mappings, expected load volumes, batch/commit expectations, idempotency key per feed, and whether the target is the same PostgreSQL cluster as the engine state store or a separate one (`BR-DST-007/013/014/015`, `DEP-7`).
+14. *(v2)* **Recovery objectives**: the concrete **RPO** (DR/async window) and **RTO** targets, and the local-standby **synchronous-commit** decision — deferred to the v2 hardening (`BR-NFR-018`); v1 relies on disk-marker reconciliation (`BR-NFR-016/017`).
+15. *(v2)* **Cross-source correlation** cases: which feeds must join into a **Correlation Group**, the shared correlation key, and each participant's completion signal — deferred to v2 (`BR-COR-009`); v1 correlation is single-source (`BR-COR-001..008`, `BR-COR-010`).
+16. **TAP3 ingestion rigor**: which TD.57 validations and severity mapping are required for roaming-in files, and whether any RAP/settlement output is needed sooner than "future" (`BR-VAL-007`).
+17. **Downstream receipt confirmation**: which file destinations (if any) will provide a delivery-confirmation callback/receipt, and its convention (`BR-DST-016`).
+18. **Scheduled-job cadence & failover**: poll intervals, archiver schedule, and acceptable job-failover delay under the Scheduled-Job Lease (`BR-HA-010`).

@@ -18,7 +18,7 @@ configurable front-end to collection, not a change to the pipeline.
 @startuml remote-acquire
 !theme plain
 skinparam defaultTextAlignment center
-participant "Remote Host\n(FTP/SFTP/FTPS)" as R
+participant "Remote Host\n(SFTP/FTPS)" as R
 participant "Acquirer" as A
 participant "Local Staging /\nInput Dir" as L
 database "PostgreSQL\n(fetch state/audit)" as DB
@@ -39,7 +39,7 @@ end
 
 | ID | Priority | Requirement |
 |----|:--------:|-------------|
-| BR-RMT-001 | M | The engine MUST be able to **fetch input files from remote hosts** and store them **locally** for processing, over **FTP**, **SFTP**, and **FTPS**. |
+| BR-RMT-001 | M | The engine MUST be able to **fetch input files from remote hosts** and store them **locally** for processing, over **SFTP** and **FTPS**. Because usage records carry subscriber-identifying data, **only encrypted transports (SFTP/FTPS) are supported — plain, unencrypted FTP is explicitly out of scope** (`BR-NFR-051`, `BR-CMP-001`). |
 | BR-RMT-002 | M | Remote acquisition MUST be **configurable per source**: protocol, host, port, remote path/directory, and file-selection pattern (glob/regex). |
 | BR-RMT-003 | M | Credentials/keys MUST be supplied via **secure configuration/secrets** (never hard-coded), supporting password auth and **SFTP key-based auth**. |
 | BR-RMT-004 | M | The acquirer MUST only hand a downloaded file to Collection when it is **complete and integrity-checked** (e.g. size/checksum), placing it **atomically** into the local input directory (temp-then-rename or done-marker). |
@@ -49,6 +49,8 @@ end
 | BR-RMT-008 | S | The acquirer SHOULD **retry transient failures** (connect/transfer) with backoff, and resume/re-fetch partial downloads safely; permanent failures SHOULD raise an alert. |
 | BR-RMT-009 | S | FTPS/SFTP connections SHOULD support **host-key / certificate verification** so the engine only transfers with trusted hosts. |
 | BR-RMT-010 | C | The engine COULD support configurable **concurrency and bandwidth limits** per remote host to avoid overloading source systems. |
+| BR-RMT-011 | S | The engine SHOULD support **scheduled credential/key rotation** for remote endpoints: an operator can **upload a new credential/key and set an effective-from time**, after which the engine automatically switches to it (the prior credential is retained until cutover so in-flight transfers are unaffected). Rotation MUST be RBAC-gated and audited (`BR-USR-*`, `BR-AUD-*`), the secret sourced via the secrets mechanism (`BR-NFR-054`), and a rotation that fails to authenticate at cutover MUST raise an alert (`BR-OPS-008`) rather than silently starving input. |
+| BR-RMT-012 | M *(v2)* | **(v2)** Remote **fetch polling is dynamically cluster-coordinated** — for each remote source, **exactly one instance polls/downloads at a time** via the dynamic scheduled-job lease (`BR-HA-010`), with automatic failover, so instances never open concurrent sessions to the same source. **v1 seam:** in v1, fetch polling runs on a **single nominated instance per remote source** (configuration), and correctness does **not** depend on that nomination — the **already-fetched guard** (`BR-RMT-005`) makes any accidental double-poll idempotent (a file is never acquired or processed twice). v2 replaces the static nomination with the dynamic lease **without changing fetch semantics** (the poll/download/guard logic is unchanged; only *who runs it and how failover happens* changes). |
 
 ## 6.2 Collection & Ingestion — `COL`
 
@@ -87,6 +89,7 @@ end
 | BR-DEC-009 | S | The engine SHOULD normalise decoded values into a common internal representation (typed fields with explicit units) so downstream stages are format-independent. |
 | BR-DEC-010 | C | The engine COULD support configurable **character-set / code-page** conversion during decode. |
 | BR-DEC-011 | M | The engine MUST decode **XML** input, with configurable mapping of **elements/attributes to fields** (e.g. XPath-style paths), supporting **record-per-element** extraction and nested structures, decoded incrementally (streaming) to preserve the memory guarantee. |
+| BR-DEC-012 | M *(v2)* | **(v2)** **Event-time-driven format selection** — the engine selects the format/template version **effective at the record's event-start-date/time** (`BR-COR-010`), so a file processed today but carrying yesterday's events automatically decodes under yesterday's format and scheduled format cutovers activate by event date. **v1 seam:** v1 already stores Format Definitions as **temporal, versioned config** (`effective_from`/`end_date`, `BR-CFG-009`) and decodes each source under its **currently-active** version; a format change is an operator-timed **publish** (`BR-CFG-008`) with in-flight files continuing under the version they started (`BR-CFG-007`). v2 layers **automatic event-time selection** over the *same* versioned Format Definitions — no schema change, only the selection rule changes from "current-active" to "effective-at-event-time". Multi-record-type files use the discriminator (`BR-DEC-008`) in both releases. |
 
 ## 6.4 Validation & Screening — `VAL`
 
@@ -98,6 +101,7 @@ end
 | BR-VAL-004 | S | Validation rules SHOULD be expressible **declaratively** (see [[08-data-and-configuration]]) and be versioned. |
 | BR-VAL-005 | C | The engine COULD support **severity levels** (reject vs warn-and-pass) per validation rule. |
 | BR-VAL-006 | M | Where a source's files carry **header/trailer records** (common for CDR feeds), the engine MUST support configurable parsing of them and MUST **reconcile the trailer record count against the number of records actually decoded**, flagging any mismatch as a file-level integrity failure (`BR-REC-*`). |
+| BR-VAL-007 | S | The engine SHOULD support a **TAP3 (GSMA TD.57) ingestion validation profile** for roaming-in files, recognising that TAP3 ingestion is more than generic decode: **file-sequence-number continuity** across a TAP stream (gap/duplicate detection), distinguishing **transfer vs notification** files, and **severity classification** of validation errors — *fatal* (reject the **whole file** to suspense) vs *severe* (route the **individual record** to suspense) vs *warning* (pass, recorded) — rather than a flat valid/invalid outcome. Generation of **RAP** (Returned Account Procedure) files and roaming **settlement** output remain **future scope** ([[10-roadmap]]); v1 quarantines and reports TAP3 rejects clearly for downstream/manual handling. |
 
 ## 6.5 Correlation — `COR`
 
@@ -111,6 +115,8 @@ end
 | BR-COR-006 | M | Where a pipeline performs correlation/aggregation, the engine MUST persist the **open working set** of in-flight records in a **canonical internal representation** (`BR-DEC-009`) in PostgreSQL, keyed by correlation/group key, and MUST perform the **emit atomically** — consuming the contributing member records, writing the single output record, and marking the members complete in **one transaction** — so a failure mid-emit neither loses inputs nor produces duplicates (`BR-NFR-011/012`). Member **bodies** MUST be droppable after emit (default), with **contributing-record counts and source-file references retained** for lineage (`BR-AUD-003`, `BR-REC-*`); retaining member bodies for a configurable post-emit window MAY be supported. Raw file bytes are still never persisted (`BR-NFR-009`). |
 | BR-COR-007 | M | Correlation/aggregation completion MUST be driven by a **configurable completion trigger** — an **explicit end-of-event signal** (partial-record indicator / closing cause / final flag / sequence number), a **time window / grace timeout**, a **record count**, or a **session-close** event — with a configurable **incomplete-at-timeout policy** (emit-partial / suspend / discard) and a configurable **late-arrival policy** (adjustment-delta / suspend / discard). Every completion, timeout, and late-arrival outcome MUST be audited. |
 | BR-COR-008 | M | Open windows MUST be **owned collectively via PostgreSQL**, not bound to the instance that ingested their members. Any instance MUST be able to append a member (atomic upsert, `BR-COR-006`); a **due window** (completion trigger met or deadline passed) MUST be **claimed for emit by exactly one surviving instance** using the same `SELECT … FOR UPDATE SKIP LOCKED` mechanism as file claims (`BR-HA-003`), transitioning `open → emitting → emitted` transactionally. If the instance that ingested a window's members fails, another instance MUST still complete it — **no window stranded, none emitted twice**. A window still being actively appended to MUST NOT be completed prematurely. |
+| BR-COR-009 | S *(v2)* | **(v2)** **Cross-source (multi-feed) correlation** — assembling one logical record from **partial records that arrive on different sources/pipelines** (e.g. the two legs of a call from different MSCs, or a data session split across SGW-CDR and PGW-CDR), modelled as a **Correlation Group** ([[08-data-and-configuration]]) that **more than one source pipeline feeds**, keyed by a shared correlation key. **v1 seam:** v1 supports single-source correlation/aggregation (`BR-COR-001..008`) whose working set is **keyed by correlation key and is already source-agnostic** — the persisted member rows (`BR-COR-006`) carry the key, not a hard source binding, and cluster ownership/atomic-emit (`BR-COR-008`) are independent of which pipeline appended a member. v2 therefore adds cross-source correlation by allowing **more than one pipeline to append to the same keyed working set** (the Correlation Group config) — **reusing the v1 working-set, claim, emit, and input-conservation machinery unchanged**; no change to the persistence model or emit transaction. Participating sources must produce **key-compatible canonical records** (shared key present and normalised, `BR-TRN-010`, `BR-DEC-009`). |
+| BR-COR-010 | M | Correlation/aggregation MUST use a well-defined **time basis**. The record's **canonical event time is its event start-date/time** (the start of the underlying event) carried in the record; **grouping** keys (e.g. `event_date`), **effective-dated reference-data/rule selection** (`BR-ENR-005`), and **window assignment** MUST be computed from this **event time**. (Event-time-driven *format-version* selection is the v2 extension `BR-DEC-012`; v1 decodes under the current-active format but still windows/groups by event time.) The **grace-timeout** completion trigger (`BR-COR-007`), by contrast, is measured in **arrival/processing (wall-clock) time** — time elapsed since the last member for the key was appended. A record whose event time falls in an **already-emitted** window/group is a **late arrival** handled by the late-arrival policy (`BR-COR-007`); a record whose event time is old but still within an **open** window is placed in that window by event time. Event-time computation MUST be **timezone- and DST-aware** (`BR-TRN-010`) so window and group boundaries are unambiguous. |
 
 ## 6.6 Deduplication — `DUP`
 
@@ -166,6 +172,7 @@ end
 | BR-DST-013 | M | RDBMS load MUST be **transactional and idempotent**: rows are written in **bounded, committed batches** (all-or-nothing per batch), and re-delivery from store-and-forward retry (`BR-DST-010`), crash recovery (`BR-NFR-011/012`), operator re-send (`BR-DST-009`), or replay (`BR-ERR-009/010`) MUST NOT create **duplicate rows** — via an **upsert / delivery-dedup key** (e.g. `INSERT … ON CONFLICT`) on a business/record identifier. A record counts as **delivered only once its batch commits** (`BR-REC-009`). |
 | BR-DST-014 | M | The engine does **not own or migrate** the target schema (the RDBMS is a **client-owned** load target, `DEP-7`, `ASM-13`). The field→column mapping MUST be **validated against the target table** at configuration/publish time (`BR-CFG-003`), and a **runtime schema mismatch** (missing/renamed column, type/constraint violation) MUST route the affected records to **suspense** with a clear reason (`BR-ERR-001`) and alert (`BR-OPS-008`) — never crash the pipeline or silently drop rows. |
 | BR-DST-015 | S | RDBMS load SHOULD support a **configurable batch size / commit interval** (bounded, to protect both the engine's memory budget and the target's transaction/lock load), **pooled connections** to the target, and optional **rate limiting** per target so the engine does not overwhelm the client's database (`BR-OPS-006`, `BR-NFR-002`). |
+| BR-DST-016 | S | For **file destinations**, where a downstream consumer can confirm receipt, the engine SHOULD support an **optional, per-destination delivery-confirmation callback** — a downstream-provided endpoint (or receipt-file/acknowledgement convention) the engine calls, or watches for, to confirm the consumer has **received the full contents** of an output file. Until confirmation is received, the file's `Delivery Record` (`BR-DST-009`) stays in a **written-but-unconfirmed** state; on confirmation it moves to **delivered**. This narrows the completeness boundary from *written-to-disk* toward *received-by-consumer* (`ASM-6`): where a destination has a callback configured, a source file MUST NOT reach "done" (`BR-COL-009`) until the confirmation is in, and a **missing/late confirmation MUST raise an alert** (`BR-OPS-008`). The callback is **optional** — destinations without one retain the v1 default (delivered = atomically written). Confirmation outcomes feed reconciliation (`BR-REC-002`). |
 
 ## 6.10 Error, Suspense & Reprocessing — `ERR`
 
@@ -218,7 +225,7 @@ endif
 :**Compress** into archive
   (gzip / zip / tar.gz);
 :**Transfer** archive to configured
-  remote location (FTP/SFTP/FTPS);
+  remote location (SFTP/FTPS);
 if (transfer verified?) then (no)
   :retry / alert;
   stop
@@ -235,7 +242,7 @@ stop
 |----|:--------:|-------------|
 | BR-ARC-001 | M | The engine MUST provide **automatic archiving** of processed files from the "done" directory, selecting files older than a **configurable age threshold (X days)**. |
 | BR-ARC-002 | M | Archiving MUST **compress** the selected files into an archive using a **configurable compression format** (e.g. gzip, zip, tar.gz). |
-| BR-ARC-003 | M | Archiving MUST **transfer the compressed archive to a configurable remote location** over FTP/SFTP/FTPS (reusing `BR-RMT-*` transport & credential handling). |
+| BR-ARC-003 | M | Archiving MUST **transfer the compressed archive to a configurable remote location** over SFTP/FTPS (reusing `BR-RMT-*` transport & credential handling). |
 | BR-ARC-004 | M | The archiving job MUST run on a **configurable schedule** (e.g. interval or cron-style), and the age threshold, grouping, format, and destination MUST all be configurable. |
 | BR-ARC-005 | S | Archiving SHOULD support a configurable **grouping/batching policy** (e.g. one archive per day and/or per source) and a **naming template** for archive files. |
 | BR-ARC-006 | M | The engine MUST **verify the remote transfer succeeded** before deleting local "done" files, so archiving never loses data on a failed upload. |
@@ -251,7 +258,7 @@ stop
 | BR-AUD-001 | M | The engine MUST persist an **audit trail** in PostgreSQL capturing significant events: file collected/rejected/completed, record suspended/reprocessed/discarded, configuration change, and operator control actions. |
 | BR-AUD-002 | M | Each audit entry MUST carry a **timestamp, correlation identifier, event type, and payload/context** sufficient to reconstruct what happened. |
 | BR-AUD-003 | M | It MUST be possible to trace an **output record back to its source file** (and, where feasible, source record) and forward from a source file to its outcomes. |
-| BR-AUD-004 | S | Audit records SHOULD be **append-only / tamper-evident** (not updated in place). |
+| BR-AUD-004 | M | Audit records MUST be **append-only and tamper-evident** — written once, **never updated or deleted in place**, and protected by a **tamper-evidence mechanism** (e.g. a per-entry hash chained to the prior entry, or an equivalent verifiable sequence) so that any insertion, deletion, or modification of the trail is **detectable**. Because the engine's whole value proposition is *provable* revenue integrity and regulatory audit (D-1, D-4), an audit trail that can be silently altered would undermine every completeness and compliance claim. Retention/pruning (`BR-AUD-005`) removes only whole aged segments per policy, never selectively edits within the retained trail. |
 | BR-AUD-005 | S | Audit and operational history SHOULD be subject to a configurable **retention policy**. |
 
 ## 6.14 Configuration & Rule Management — `CFG`
@@ -263,12 +270,13 @@ stop
 | BR-CFG-003 | S | Configuration SHOULD be **validatable** (schema-checked) before it is activated, rejecting invalid config with clear errors. |
 | BR-CFG-004 | S | Configuration SHOULD be **versioned**, and changes SHOULD be audited (BR-AUD-001). |
 | BR-CFG-005 | S | It SHOULD be possible to **add a new source and its full pipeline** without redeploying the engine. |
-| BR-CFG-006 | C | The engine COULD support a **dry-run / test-harness** mode to evaluate a pipeline against sample input without distributing output. |
+| BR-CFG-006 | S | The engine SHOULD support a **dry-run / test-harness** mode to evaluate a pipeline against sample input without distributing output — so a new or edited revenue-bearing feed can be validated end-to-end **before** it is published to production (`BR-CFG-008`, `BR-UI-009`). |
 | BR-CFG-007 | M | When configuration is updated, the change MUST be **propagated and applied (hot-reloaded) across all running instances** in the cluster **without a restart**, so every instance converges to the new active version consistently; in-flight files continue under the version they started with. |
 | BR-CFG-008 | M | The engine MUST support a **publish-to-production action** — a single operator step ("push to production" button in the GUI, and equivalent API call) that **promotes a prepared/edited pipeline configuration to the production instances** and activates it cluster-wide (triggering `BR-CFG-007`). The action is RBAC-gated and audited. |
 | BR-CFG-009 | M | Configuration records MUST **never be physically deleted**. Supersession or "deletion" MUST be modelled by setting an **`end_date`** (temporal/soft-delete), retaining full history in PostgreSQL so any prior configuration version can be **inspected and restored/reactivated**. This also underpins effective-dating (`BR-ENR-005`). |
 | BR-CFG-010 | M | Each pipeline's **processing mode** MUST follow from its configured stages: a pipeline **without** correlation/aggregation runs **streaming (pass-through)** — no record bodies persisted, memory bounded by concurrency/buffers (`BR-NFR-001`); a pipeline **with** correlation/aggregation runs **collating** — persisting a bounded canonical working set for those stages only (`BR-COR-006`). The mode is **per pipeline** (different sources may differ on one cluster) and MUST be visible in the pipeline configuration. |
 | BR-CFG-011 | S | The engine SHOULD support **exporting a pipeline and its dependent configuration** (formats, rule sets, transforms, routing, and optionally reference-data snapshots) as a **portable, versioned artifact (JSON)** and **importing** it into another deployment — the primary means of seeding/onboarding a new tenant. Import MUST perform pre-activation **validation** (`BR-CFG-003`), configurable **conflict handling** (create / update / skip), preservation of **effective-dating**, and **environment-specific overrides** (paths, hosts). Exports MUST **exclude plaintext secrets**, carrying secret **references/placeholders** resolved on import (`BR-NFR-054`). The action is RBAC-gated and audited. |
+| BR-CFG-012 | S | Configuration editing MUST be protected against **concurrent conflicting edits**: when a user opens a pipeline/config item for editing, the engine MUST take an **edit lock** on that item so that other users are **blocked from editing it concurrently**, shown a clear message that the item is currently being edited (and by whom). The lock MUST be **released on save, cancel, or a configurable idle/expiry timeout** (so an abandoned edit session cannot lock an item forever), and lock acquisition/release MUST be audited. This prevents two Configuration Analysts silently overwriting each other's changes to the same live pipeline. |
 
 ## 6.15 Operability & Control — `OPS`
 
@@ -286,6 +294,7 @@ stop
 | BR-OPS-010 | S | **Log rotation and retention MUST be configurable** (size/age-based), so log growth is bounded on each host. |
 | BR-OPS-011 | S | Alerts MUST have an **acknowledge/clear lifecycle** (open → acknowledged → resolved), tracked in the system. Email alerts SHOULD include an **actionable resolve/acknowledge link** that calls back to baasparse to update the alarm state; the callback MUST be **secured with a single-use, expiring, signed token**, be **RBAC-checked and audited**, and be **idempotent** (safe against mail-client link pre-fetching). |
 | BR-OPS-012 | S | The engine SHOULD monitor **inter-instance clock skew** and NTP health (`ASM-3b`) and alert when skew exceeds a configurable threshold, since distributed claim/lease and window-completion timing depend on synchronised clocks (`BR-HA-003`, `BR-COR-008`). |
+| BR-OPS-013 | S | The engine SHOULD handle a **backlog / catch-up** situation — onboarding a new feed with historical files, or draining the accumulation from a feed/instance outage — by **processing the backlog as a large batch of files through the normal pipeline** (same claim, decode, collation, dedup, reconciliation paths; no separate code path). Because event-time drives grouping and effective-dated config (`BR-COR-010`, `BR-DEC-012`), historical files reconcile into their **correct event-time windows/groups**. The engine MUST make **backlog depth / drain progress visible** (`BR-OPS-002`) and MUST treat the **real-time latency target (`BR-NFR-008`) as relaxed during an explicit catch-up** — measured/reported separately — so a large backfill does not read as a latency-SLA breach. Backpressure and horizontal scale (`BR-NFR-002/020`) bound resource use during catch-up. |
 
 ---
 
@@ -360,8 +369,9 @@ SVC ..> "Data plane\n(engine runtime)" as DP : configure / control
 | BR-UI-006 | S | The GUI SHOULD let operators **monitor and control** flows: status/throughput, start/stop/pause/resume, suspense inspection & reprocess, and reconciliation views (`BR-OPS-*`, `BR-ERR-*`, `BR-REC-*`). |
 | BR-UI-007 | S | The GUI SHOULD **validate configuration before save/activation** and surface clear, field-level errors (`BR-CFG-003`). |
 | BR-UI-008 | S | The GUI SHOULD **enforce RBAC in the presentation** — showing and permitting only the actions allowed for the user's role (defence in depth alongside server-side enforcement). |
-| BR-UI-009 | C | The GUI COULD provide a **dry-run/preview** to test a transformation/file-structure model against sample input before activation (`BR-CFG-006`). |
+| BR-UI-009 | S | The GUI SHOULD provide a **dry-run/preview** to test a transformation/file-structure model against sample input before activation (`BR-CFG-006`). |
 | BR-UI-010 | M | All GUI actions MUST be **authenticated and audited** (`BR-USR-002`, `BR-USR-006`). |
+| BR-UI-011 | S | When a user opens a pipeline/config item for editing, the GUI MUST **take an edit lock and indicate to any other user that the item is currently being edited** (and by whom), blocking concurrent edits, per `BR-CFG-012`. The lock is released on save/cancel/idle-timeout. |
 
 ## 6.19 High Availability & Multi-Instance — `HA`
 
@@ -409,6 +419,7 @@ end note
 | BR-HA-007 | S | Adding or removing an instance SHOULD require **no reconfiguration of the others** (instances self-coordinate via PostgreSQL) and SHOULD scale throughput roughly with instance count until shared-storage/DB limits are reached. |
 | BR-HA-008 | S | The system SHOULD tolerate **rolling restarts/upgrades** (drain and hand off claims) without stopping the overall service or losing data. |
 | BR-HA-009 | S | Operational views (`BR-OPS-*`, GUI/API) SHOULD present a **cluster-wide** picture (all instances, their health, and per-instance throughput), not just the local node. |
+| BR-HA-010 | M *(v2)* | **(v2)** **Dynamic scheduled-job coordination** — scheduled/singleton cluster work (remote-fetch polling per source `BR-RMT-012`, the archiver `BR-ARC-004`, feed-liveness monitoring `BR-OPS-007`) is coordinated by a **scheduled-job lease** (a claimable row worked with `SELECT … FOR UPDATE SKIP LOCKED` + heartbeat, keyed by job type and, for fetch, by source), so any instance may run a job, only the lease-holder does, and it **fails over automatically**. **v1 seam:** in v1 these jobs run on a **single nominated instance** (configuration) and their correctness does **not** depend on single-runner enforcement — the **already-fetched guard** (`BR-RMT-005`) makes duplicate fetch idempotent, **verify-before-prune** (`BR-ARC-006`) makes duplicate archive-runs safe, and duplicate liveness alerts are merely redundant (deduplicated at the alarm, `BR-OPS-011`). So a v1 misconfiguration wastes work but **never loses or duplicates data**. v2 replaces the static nomination with the dynamic lease — **same jobs, same safety backstops**, adding automatic failover and load-spreading. (Collation-window emit already uses the lease mechanism in v1, `BR-COR-008`, proving the seam.) |
 
 ## 6.20 Regulatory & Data Protection — `CMP` *(optional, configurable)*
 

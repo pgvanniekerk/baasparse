@@ -50,7 +50,7 @@ Requirements are identified as `BR-<AREA>-<NNN>` so they can be traced end-to-en
 
 | Area code | Domain |
 |-----------|--------|
-| `RMT` | Remote acquisition (FTP / SFTP / FTPS fetch to local) |
+| `RMT` | Remote acquisition (SFTP / FTPS fetch to local) |
 | `COL` | Collection / ingestion |
 | `DEC` | Decoding / parsing (ASN.1, JSON, XML, DSV, fixed-position) |
 | `VAL` | Validation & screening |
@@ -148,10 +148,17 @@ These are **given** (see [[09-assumptions-constraints-dependencies]] for the ful
 - **Performance and memory efficiency are the top priority** — the engine must process
   large volumes with a bounded, predictable memory footprint (streaming, not load-all).
 - **v1** = file-based mediation, with input from the **local file system** and via
-  **remote fetch (FTP/SFTP/FTPS)**; input formats **ASN.1, JSON, XML, DSV,
+  **remote fetch (SFTP/FTPS)**; input formats **ASN.1, JSON, XML, DSV,
   fixed-position**; configurable transformations; **output to files and/or RDBMS load
   (e.g. PostgreSQL)**; processed-file **archiving**.
 - **v1 management plane** = a **built-in user system with RBAC**, an **HTMX GUI hosted in
   the Go app**, and a **REST API** for external systems — sharing one auth model.
-- **v2** = **extended alerting** channels beyond email (webhook/SNMP/chat) and broader
-  integrations.
+- **v1 correlation** = **single-source** correlation/aggregation on an **event-time** basis;
+  cross-source correlation is v2. v1 uses **async replication + disk-marker reconciliation**,
+  scheduled jobs on a **nominated instance**, and current-active format decode.
+- **v2** = **scale-out & resilience hardening** on the unchanged v1 pipeline — cross-source
+  correlation, dynamic scheduled-job coordination/failover, synchronous-commit RPO=0 & formal
+  RPO/RTO, event-time format selection, dedup read-path pre-filter, and write-path scale-out
+  toward tier-1 — plus **extended alerting** (webhook/SNMP/chat) and broader integrations.
+  Every v2 item lands on a **seam built into v1** (see [[10-roadmap]] §10.6), so growth toward
+  a tier-1 operator is additive, not a re-architecture.

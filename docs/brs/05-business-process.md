@@ -50,7 +50,7 @@ stop
 
 | Stage | Business intent | Key control |
 |-------|-----------------|-------------|
-| Fetch *(optional)* | Bring remote files to local disk for processing | FTP/SFTP/FTPS; integrity check; already-fetched check |
+| Fetch *(optional)* | Bring remote files to local disk for processing | SFTP/FTPS; integrity check; already-fetched check |
 | Collect | Take ownership of an input file exactly once | File claim / lock; sequence & duplicate-file checks |
 | Decode | Turn raw bytes into structured records | Format-specific parser; reject on decode failure |
 | Validate | Enforce structural & business correctness | Rule set; suspense on failure |
@@ -190,7 +190,7 @@ state "Archived (compressed)" as A
 state "Offloaded (remote archive)" as O
 
 [*] --> R
-R --> I : FTP/SFTP/FTPS fetch\n(integrity + already-fetched check)
+R --> I : SFTP/FTPS fetch\n(integrity + already-fetched check)
 I --> P : claimed → **moved to in-progress**\n(processing begins)
 P --> P : store-and-forward:\nretry endpoints until delivered
 P --> D : **all records delivered to\nALL fan-out endpoints** (BR-COL-009)
@@ -266,6 +266,27 @@ Two policies must be configured because completeness and real-time are in tensio
   **suspend**, or **discard** (each audited).
 - **Late-arrival policy** — a record for a key already emitted: **emit an adjustment/delta**,
   **suspend**, or **discard** (each audited; dedup, `BR-DUP-*`, guards against double-count).
+
+### Time basis — event time vs arrival time (`BR-COR-010`)
+
+Windowing uses **two distinct clocks**, and the distinction matters for correctness:
+
+- A record's **canonical event time is its event start-date/time** — the start of the
+  underlying event (call/session), carried in the record itself. **Grouping keys** (e.g.
+  `event_date`), **window assignment**, and **effective-dated config/format/rule selection**
+  (`BR-DEC-012`, `BR-ENR-005`) are all computed from **event time**. So a file processed
+  *today* that carries *yesterday's* events lands in yesterday's windows/groups and decodes
+  under yesterday's effective format — never under "now".
+- The **grace-timeout** trigger (#2 above) is the exception: it is measured in
+  **arrival / wall-clock time** — elapsed time since the last member for the key was
+  appended — because "have we waited long enough for stragglers?" is inherently a
+  real-world-time question.
+
+A record whose **event time falls inside an already-emitted** window is a **late arrival**
+(late-arrival policy); one whose event time is old but lands inside a **still-open** window
+is simply placed in that window by event time. Event-time computation is
+**timezone/DST-aware** (`BR-TRN-010`) so window and group boundaries are unambiguous across
+feeds and across a DST change.
 
 ### Consequence: records-in ≠ records-out (by design)
 

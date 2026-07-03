@@ -6,7 +6,7 @@
 
 | Release | Theme | One-line goal |
 |---------|-------|---------------|
-| **v1** | **Real-time mediation (file + RDBMS), clustered** | Continuously collect files (local, shared, and remote FTP/SFTP/FTPS), decode ASN.1/JSON/XML/DSV/fixed-position, apply configurable transformations, and fan out to **file outputs and/or RDBMS load** — reliably, auditably, and **always-on across multiple Linux servers**. |
+| **v1** | **Real-time mediation (file + RDBMS), clustered** | Continuously collect files (local, shared, and remote SFTP/FTPS), decode ASN.1/JSON/XML/DSV/fixed-position, apply configurable transformations, and fan out to **file outputs and/or RDBMS load** — reliably, auditably, and **always-on across multiple Linux servers**. |
 | **v2** | **Extended alerting & integrations** | Add alerting channels beyond email (webhook/SNMP/chat); broaden integration/transport options. |
 | **Future** | **Online charging & settlement** | Real-time session/online charging (Diameter/OCS, 5G converged charging), roaming settlement (TAP/RAP), object-store transports — *not committed here.* |
 
@@ -18,8 +18,11 @@
   instances across multiple Linux servers**, sharing a **common file-storage area** and
   coordinating file ownership via PostgreSQL, with no single point of failure and no
   double-processing.
-- **Remote acquisition** of input files from remote hosts over **FTP / SFTP / FTPS**,
-  downloaded and stored on the shared area for processing.
+- **Remote acquisition** of input files from remote hosts over **SFTP / FTPS** (encrypted
+  transports only — **plain FTP is out of scope** as records carry subscriber data),
+  downloaded and stored on the shared area for processing; in v1, **fetch polling runs on a
+  nominated instance** with an already-fetched guard preventing double-acquisition (dynamic
+  multi-instance job coordination is v2, §10.6).
 - **Collection** of input files from **local and shared file-system directories**
   (event-driven), including directories populated by remote acquisition, with **optional
   input decompression** (`.gz`/`.zip`) and an **optional integrity/authenticity check**
@@ -32,8 +35,11 @@
   - **Fixed-position** — fixed-width columnar text with configurable field offsets/lengths.
 - **Validation & screening** of decoded records against configurable rules, including
   **header/trailer record-count reconciliation** for CDR-style files.
-- **Correlation** of related/partial records into complete logical records, and
-  **aggregation** (summarising many records into one) — configurable.
+- **Single-source correlation** of related/partial records into complete logical records, and
+  **aggregation** (summarising many records into one) — configurable, on an **event-time**
+  basis (windows/groups keyed by the record's event-start-date). *Cross-source correlation
+  across multiple feeds (Correlation Groups) is **v2**, built on v1's source-agnostic keyed
+  working set (§10.6).*
 - **Deduplication** of records based on configurable keys.
 - **Enrichment** via configurable lookups against reference data, with a
   **reference-data lifecycle** and optional **effective-dating** of rules/reference data.
@@ -53,7 +59,7 @@
   optionally to a chosen subset of destinations (e.g. only RA); requires the source file on
   disk — the **operator re-adds an archived file** manually (no automatic retrieval).
 - **Automatic archiving** — periodically compressing "done" files older than a
-  configurable age and shipping them to a configurable **remote location** (FTP/SFTP/FTPS),
+  configurable age and shipping them to a configurable **remote location** (SFTP/FTPS),
   with local retention/pruning.
 - **Error/suspense handling** — quarantine of unprocessable records with reason codes,
   and **reprocessing** after correction.
@@ -89,10 +95,18 @@
 | Item | Rationale / target |
 |------|--------------------|
 | Alerting channels beyond email (webhook, SNMP, chat) | **v2** (v1 = email) |
+| **Plain (unencrypted) FTP** transport | Out — records carry subscriber data; **SFTP/FTPS only** (`BR-RMT-001`) |
+| **Cross-source correlation** (Correlation Groups across feeds) | **v2** — v1 = single-source; seam = source-agnostic keyed working set (`BR-COR-009`, §10.6) |
+| **Dynamic scheduled-job coordination / auto-failover** (fetch/archive/liveness) | **v2** — v1 = nominated instance + idempotent backstops (`BR-HA-010`, `BR-RMT-012`, §10.6) |
+| **Synchronous-commit RPO=0 & formal RPO/RTO** | **v2** — v1 = async replication + disk-marker reconciliation (`BR-NFR-018`, §10.6) |
+| **Event-time format-version selection** | **v2** — v1 = current-active format via temporal config (`BR-DEC-012`, §10.6) |
+| **Dedup read-path pre-filter** (in-memory) | **v2** — v1 = correct DB-backed dedup (`BR-NFR-025`, §10.6) |
+| Interconnect/roaming **settlement & RAP** generation (v1 ingests + validates TAP3 only) | Future (`BR-VAL-007`) |
+| Scaling **beyond the single-PostgreSQL-primary write ceiling** (sharded/partitioned state, external dedup store) | **v2/future** — v1 targets small-to-medium volumes (`BR-NFR-024`, `R30`) |
 | Automated retrieval of archived files for replay | Operator re-adds manually (`BR-ERR-009`, `ASM-14`) |
 | Online / session-based real-time charging (Diameter/OCS, RADIUS, 5G CHF) | Future — v1 real-time is **file** processing, not online charging |
 | Streaming transport collectors (TCP, Kafka, probes) | Future |
-| Object-store / cloud transports (S3, GCS, Azure Blob) | Future (v1 remote = FTP/SFTP/FTPS) |
+| Object-store / cloud transports (S3, GCS, Azure Blob) | Future (v1 remote = SFTP/FTPS) |
 | Rating / pricing of records | Downstream billing responsibility |
 | Interconnect/roaming settlement (TAP/RAP generation) | Future |
 | Multi-tenancy | Out by design — deployed **per tenant, on-prem** (one tenant per deployment) |
@@ -109,7 +123,7 @@
 skinparam defaultTextAlignment center
 skinparam rectangle { BackgroundColor #F7F7F7 BorderColor #666 }
 
-rectangle "FETCH\n(FTP/SFTP/FTPS)" as Z #E6F4EA
+rectangle "FETCH\n(SFTP/FTPS)" as Z #E6F4EA
 rectangle "COLLECT\n(local FS)" as A
 rectangle "DECODE\nASN.1/JSON/XML/DSV/Fixed" as B
 rectangle "VALIDATE ·\nCORRELATE · DEDUP" as C

@@ -65,7 +65,7 @@ entity "Source" as SRC {
 entity "Remote Endpoint" as RMT {
   identity
   --
-  protocol: FTP|SFTP|FTPS
+  protocol: SFTP|FTPS
   host, port, remote path
   credentials/key ref
   host-key/cert trust
@@ -84,11 +84,21 @@ entity "Format Definition" as FMT {
   --
   kind: ASN.1 | JSON | XML | DSV | Fixed
   structure / field spec
+  version
+  effective_from / end_date
 }
 entity "Pipeline" as PIPE {
   identity
   --
   ordered stages
+}
+entity "Correlation Group (v2)" as CG {
+  identity
+  --
+  name
+  shared correlation key
+  participating pipelines/sources
+  completion trigger & policy
 }
 entity "Validation Rule Set" as VAL {
   identity
@@ -223,12 +233,29 @@ entity "File Claim / Lease" as CLM {
   processing attempts,
   status (held/released/expired)
 }
+entity "Scheduled-Job Lease (v2)" as SJL {
+  identity
+  --
+  job type (fetch/archive/liveness),
+  scope (e.g. source ref),
+  owning instance,
+  lease acquired-at / expires-at,
+  status (held/released/expired)
+}
+entity "Config Edit Lock" as CEL {
+  identity
+  --
+  config item ref,
+  locked-by (user), acquired-at,
+  idle/expiry deadline
+}
 entity "Delivery Record" as DLV {
   identity
   --
   output file ref, destination,
   format, delivered-at,
   state (pending/written/
+    written-unconfirmed/
     delivered/resent/failed)
 }
 entity "Alarm" as ALM {
@@ -260,6 +287,8 @@ PIPE ||--o{ ENR : includes
 PIPE ||--|| TRN : includes
 PIPE ||--o{ DST : routes to
 ENR }o--o{ REF : reads
+PIPE }o--o| CG : may feed (cross-source, v2)
+CG ||--o{ CST : maintains (v2)
 
 SRC ||--o{ PF : produces
 PF ||--o{ SUS : may raise
@@ -285,10 +314,11 @@ USR ||--o{ AUD : actions recorded in
 | Entity | Kind | Meaning |
 |--------|------|---------|
 | **Source** | Config | A named origin of input files (a watched local directory + done directory + selection + collection policy; optional remote fetch). |
-| **Remote Endpoint** | Config | A remote host connection (FTP/SFTP/FTPS): protocol, host, path, credentials, trust — used for fetching input and/or offloading archives. |
+| **Remote Endpoint** | Config | A remote host connection (SFTP/FTPS): protocol, host, path, credentials, trust — used for fetching input and/or offloading archives. |
 | **Archive Policy** | Config | Rules for archiving "done" files: age threshold, compression format, grouping/naming, local retention, and target endpoint. |
-| **Format Definition** *(a.k.a. File-Structure Model)* | Config | How to decode a source's records: kind (ASN.1/JSON/XML/DSV/Fixed) + structure. This is what the GUI's **file-structure modelling** (`BR-UI-004`) produces. |
+| **Format Definition** *(a.k.a. File-Structure Model)* | Config | How to decode a source's records: kind (ASN.1/JSON/XML/DSV/Fixed) + structure. Stored as **temporal, versioned config** (`effective_from`/`end_date`, `BR-CFG-009`); v1 decodes under the **current-active** version, and **event-time-based version selection is v2** (`BR-DEC-012`). This is what the GUI's **file-structure modelling** (`BR-UI-004`) produces. |
 | **Pipeline** | Config | The ordered stages applied to a source's records. |
+| **Correlation Group** *(v2)* | Config | A named **cross-source correlation scope** (`BR-COR-009`, **v2**): a shared correlation key that **multiple source pipelines feed** their canonical records into (e.g. call legs from different MSCs), emitting under one completion policy. It reuses v1's **source-agnostic keyed working set** (`BR-COR-006/008`) unchanged — the seam that lets v2 add cross-feed correlation without re-architecting (§10.6). |
 | **Validation Rule Set** | Config | Declarative rules deciding valid vs suspended vs discarded. |
 | **Correlation Rule** | Config | How partial/related records are joined (key, window, completion policy). |
 | **Dedup Rule** | Config | Key + retention window defining duplicate detection. |
@@ -304,7 +334,9 @@ USR ||--o{ AUD : actions recorded in
 | **Reconciliation Summary** | Operational | Counts proving completeness for a file/stream/period. |
 | **Fetch Registry** | Operational | Record of already-fetched remote files, guarding against re-download/re-processing. |
 | **File Claim / Lease** | Operational | The distributed lock by which one instance owns a file; expires on instance failure so another can take over (`BR-HA-003/004`). |
-| **Delivery Record** | Operational | Tracks an output file's delivery state per destination; a Processed File is "done" only when all its Delivery Records succeed (`BR-DST-009/010`). |
+| **Scheduled-Job Lease** *(v2)* | Operational | The same claim/lease mechanism applied to **periodic/singleton cluster jobs** — remote-fetch polling (per source), archiving, feed-liveness — so exactly one instance runs each and it fails over automatically (`BR-HA-010`, `BR-RMT-012`, **v2**). In v1 these jobs run on a **nominated instance** with idempotent backstops; the lease (already used for window emit, `BR-COR-008`) replaces the nomination in v2 (§10.6). |
+| **Config Edit Lock** | Administration | A short-lived lock taken when a user opens a config item for editing, blocking concurrent edits and released on save/cancel/idle-timeout (`BR-CFG-012`, `BR-UI-011`). |
+| **Delivery Record** | Operational | Tracks an output file's delivery state per destination; a Processed File is "done" only when all its Delivery Records succeed (`BR-DST-009/010`). Where a destination has a **receipt callback** (`BR-DST-016`), a written file stays **written-unconfirmed** until the consumer confirms full receipt. |
 | **Alarm** | Operational | A raised operational issue with an **open → acknowledged → resolved** lifecycle, resolvable via a secure email callback link (`BR-OPS-011`). |
 | **Archive Run** | Operational | Record of one archiving operation: files included, archive name/size, destination, outcome. |
 | **User** | Administration | A person or system account that authenticates to the GUI/API; holds role(s) and a securely hashed credential. |
@@ -396,7 +428,23 @@ intent — **shape only**, final schema is a design deliverable:
   suspense, and audit are all in shared PostgreSQL, so any instance behaves identically and a
   failed instance's work can be taken over (`BR-HA-*`). The File Claim/Lease is realised as
   a claims table worked with `SELECT … FOR UPDATE SKIP LOCKED` plus a heartbeat-renewed
-  lease, so exactly one instance owns a file and a crashed owner's claim is reclaimable.
+  lease, so exactly one instance owns a file and a crashed owner's claim is reclaimable. The
+  **same claim/lease mechanism** governs collation-window emit (`BR-COR-008`) in v1 and, in
+  **v2**, periodic/singleton jobs — fetch polling, archiving, feed-liveness — via a
+  **Scheduled-Job Lease** (`BR-HA-010`, `BR-RMT-012`). In **v1** those jobs run on a
+  **nominated instance** with idempotent backstops (already-fetched guard, verify-before-prune),
+  so the v2 lease is a drop-in upgrade, not a re-design (§10.6).
+- **The correlation working set is source-agnostic** — keyed by correlation key, not bound to
+  the ingesting source. v1 uses this for **single-source** correlation/aggregation; the same
+  structure is the **seam** for **v2 cross-source correlation** (a **Correlation Group**,
+  `BR-COR-009`), where several pipelines feed one shared, cluster-owned working set so
+  multi-leg/multi-feed events (e.g. call legs from different MSCs) correlate — reusing the v1
+  persistence/claim/emit machinery unchanged (§10.6).
+- **The single PostgreSQL primary is the shared write bottleneck** — sufficient for the v1
+  small-to-medium target with partitioning, partition-drop expiry, pooling, and streaming-mode
+  feeds (the dedup read-path pre-filter and write-path scale-out are **v2**, `BR-NFR-024/025`);
+  scaling past it toward tier-1 volumes is explicit **v2/future** work (`R30`, [[10-roadmap]])
+  that must not require re-architecting the pipeline — the primary v1→v2 seam (§10.6).
 - **Disk is a recoverable source of completion state** — each "done" file carries an
   on-disk completion marker (`BR-COL-009`), so a database restored behind the file area is
   reconciled from disk rather than by reprocessing (`BR-NFR-017`); state DB and file area are

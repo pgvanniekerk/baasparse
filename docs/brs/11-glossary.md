@@ -31,10 +31,10 @@
 
 | Term | Definition |
 |------|------------|
-| **Remote acquisition / Fetch** | Downloading input files from a remote host (FTP/SFTP/FTPS) into a local directory for processing. |
-| **FTP** | *File Transfer Protocol* — a standard, unencrypted file-transfer protocol. |
+| **Remote acquisition / Fetch** | Downloading input files from a remote host (SFTP/FTPS) into a local directory for processing. |
 | **SFTP** | *SSH File Transfer Protocol* — file transfer over an encrypted SSH channel; supports key-based auth. |
 | **FTPS** | *FTP Secure* — FTP with TLS encryption. |
+| **Plain FTP** | Unencrypted File Transfer Protocol — **not supported**: because usage records carry subscriber-identifying data (MSISDN/IMSI), only **encrypted** remote transports (SFTP/FTPS) are permitted (`BR-RMT-001`, `BR-NFR-051`). |
 | **"Done" directory** | The directory a source file is moved to after it has been fully processed, separating processed inputs from pending ones. |
 | **Archiving** | Scheduled housekeeping that compresses "done" files older than a configured age and transfers them to a remote location, then prunes local copies. |
 | **Verify-before-prune** | Confirming a remote archive transfer succeeded before deleting the local files, to prevent data loss. |
@@ -42,6 +42,9 @@
 | **Decoding / parsing** | Converting raw bytes into structured records per the source format. |
 | **Validation / screening** | Checking records against structural and business rules; screening intentionally discards unwanted-but-valid records. |
 | **Correlation** | Joining multiple partial/related records into one complete logical record, by key within a time window. |
+| **Correlation Group** *(v2)* | A named **cross-source** correlation scope: several source pipelines feed one shared, cluster-owned working set keyed by a common correlation key, so multi-leg/multi-feed events (e.g. call legs from different MSCs) correlate together (`BR-COR-009`, **v2**). v1 correlation is single-source; the v1 working set is already source-agnostic, which is the seam v2 builds on (§10.6). |
+| **Event time** | A record's **event start-date/time** — the canonical clock used for windowing, group keys, and effective-dated format/rule selection; distinct from **arrival (wall-clock) time**, used only for grace-timeouts and audit stamps (`BR-COR-010`). |
+| **Catch-up / backlog** | Draining a large accumulation of files (new-feed backfill, or post-outage) through the **normal pipeline as a big batch**; event-time grouping keeps them in the right windows, and the real-time latency target is relaxed/measured separately during catch-up (`BR-OPS-013`). |
 | **Aggregation** | Summarising many records into fewer (e.g. totals per subscriber). |
 | **Deduplication (dedup)** | Detecting and removing records already processed, by a configured key, across files and restarts. |
 | **Enrichment** | Adding data to a record via lookups against reference data. |
@@ -104,8 +107,13 @@
 | **Shared file area** | Storage (e.g. NFS/clustered FS) reachable by all instances, holding input/done/archive files. |
 | **inotify** | The Linux kernel facility for filesystem event notification — how new files are detected in real time. |
 | **Distributed claim / lease** | A short-lived lock in PostgreSQL (`SELECT … FOR UPDATE SKIP LOCKED` + heartbeat lease) by which one instance owns a file; it is released/expires on failure so another instance can take over. |
+| **Scheduled-Job Lease** *(v2)* | The distributed-claim mechanism applied to **periodic/singleton** jobs (fetch polling per source, archiving, feed-liveness) so exactly one instance runs each with automatic failover (`BR-HA-010`, `BR-RMT-012`, **v2**). In v1 those jobs run on a **nominated instance** with idempotent backstops. |
+| **Nominated instance** | v1's simple stand-in for dynamic job coordination: a configured instance runs the scheduled/singleton jobs, made safe (not lossy) by idempotent backstops; replaced by the Scheduled-Job Lease in v2 (§10.6). |
 | **Split-brain** | A failure mode where two instances believe they own the same work; prevented by atomic claims + dedup. |
 | **Streaming replication / DR standby** | A PostgreSQL primary continuously replicating to one or more standbys (including a disaster-recovery standby, with automated failover e.g. Patroni/repmgr) so state survives node loss. |
+| **Synchronous vs asynchronous replication** | Sync-commit waits for the standby before acknowledging a commit (**RPO=0**); async does not (**bounded RPO**). **v1** permits async (recovery bounded by disk-marker reconciliation); **v2** makes the local standby synchronous for RPO=0 (`BR-NFR-016/018`, §10.6). |
+| **RPO / RTO** *(formal targets = v2)* | *Recovery Point Objective* (max acceptable data loss on failover) and *Recovery Time Objective* (max acceptable time to resume). **v1:** no silent loss — async failover reconciled from disk markers. **v2:** RPO=0 local, small bounded DR RPO, formal RTO (`BR-NFR-018`). |
+| **Write ceiling** | The throughput limit of the **single PostgreSQL primary** all instances commit to; sufficient for the small-to-medium v1 target, with tier-1 scaling deferred to v2/future (`BR-NFR-024`, `R30`). |
 | **NTP** | *Network Time Protocol* — keeps server clocks synchronised, needed for correct lease expiry. |
 
 ## Management-plane terms

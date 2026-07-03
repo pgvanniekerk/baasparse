@@ -109,7 +109,7 @@ These are sponsor-set constraints, recorded here for context (full treatment in
 skinparam defaultTextAlignment center
 skinparam rectangle { BackgroundColor #E8F0FE BorderColor #4472C4 }
 
-rectangle "Remote Acquisition\n(FTP/SFTP/FTPS)" as C0
+rectangle "Remote Acquisition\n(SFTP/FTPS)" as C0
 rectangle "Ingestion &\nCollection" as C1
 rectangle "Format Decoding\n(ASN.1/JSON/XML/DSV/Fixed)" as C2
 rectangle "Validation &\nScreening" as C3
