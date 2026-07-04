@@ -12,8 +12,9 @@
 
 ## 4.2 In scope — v1
 
-- **Real-time, always-on processing** — files are detected (Linux `inotify` + safety-net
-  scan) and processed **as soon as they are available**, not on batch schedules.
+- **Near-real-time, always-on processing** — files are detected by a **short-interval
+  directory scan** on the shared area (with `inotify` as a local-dir optimisation, `BR-COL-012`)
+  and processed **as soon as they are available**, not on batch schedules.
 - **Multi-instance high availability** — the engine runs as **multiple cooperating
   instances across multiple Linux servers**, sharing a **common file-storage area** and
   coordinating file ownership via PostgreSQL, with no single point of failure and no
@@ -83,8 +84,9 @@
 - **Observability** — **health-check endpoints** (liveness/readiness) and a
   **Prometheus-compatible metrics endpoint**; **configurable log rotation/retention**.
 - **Optional regulatory & data-protection features** — configurable PII
-  masking/redaction (POPIA), configurable data-retention periods (RICA), and audited,
-  RBAC-gated data access.
+  masking/redaction (POPIA), **data-subject request handling** (subject search; erasure via
+  deterministic tokenisation / crypto-shredding, `BR-CMP-005`), configurable data-retention
+  periods (RICA), and audited, RBAC-gated data access.
 - **Persistence of internal data structures in PostgreSQL** (primary + streaming-replication
   standby(s), including a DR standby); **raw file bytes are never stored in PostgreSQL** — they
   are streamed from disk. The only record data persisted is the bounded canonical collation
@@ -97,6 +99,7 @@
 | Alerting channels beyond email (webhook, SNMP, chat) | **v2** (v1 = email) |
 | **Plain (unencrypted) FTP** transport | Out — records carry subscriber data; **SFTP/FTPS only** (`BR-RMT-001`) |
 | **Cross-source correlation** (Correlation Groups across feeds) | **v2** — v1 = single-source; seam = source-agnostic keyed working set (`BR-COR-009`, §10.6) |
+| **Aggregation of the very highest-volume feeds** (single-key append rate beyond one primary's row concurrency) | **v1 limitation** — collation runs on one PostgreSQL primary; hot-key contention is mitigated by hash-partitioning the working set (`BR-COR-006`, `R20`), but feeds above that must run in **streaming (non-collating) mode** (`BR-CFG-010`). Cross-primary scale-out is v2/future (`BR-NFR-024`). Downstream: such feeds are aggregated by the **consumer/warehouse**, or onboarded when v2 write-scaling exists. |
 | **Dynamic scheduled-job coordination / auto-failover** (fetch/archive/liveness) | **v2** — v1 = nominated instance + idempotent backstops (`BR-HA-010`, `BR-RMT-012`, §10.6) |
 | **Synchronous-commit RPO=0 & formal RPO/RTO** | **v2** — v1 = async replication + disk-marker reconciliation (`BR-NFR-018`, §10.6) |
 | **Event-time format-version selection** | **v2** — v1 = current-active format via temporal config (`BR-DEC-012`, §10.6) |
@@ -126,7 +129,7 @@ skinparam rectangle { BackgroundColor #F7F7F7 BorderColor #666 }
 rectangle "FETCH\n(SFTP/FTPS)" as Z #E6F4EA
 rectangle "COLLECT\n(local FS)" as A
 rectangle "DECODE\nASN.1/JSON/XML/DSV/Fixed" as B
-rectangle "VALIDATE ·\nCORRELATE · DEDUP" as C
+rectangle "VALIDATE · DEDUP ·\nCORRELATE" as C
 rectangle "ENRICH ·\nTRANSFORM" as D
 rectangle "DISTRIBUTE\n→ files" as E #E6F4EA
 rectangle "DISTRIBUTE\n→ RDBMS (Postgres)" as F #E6F4EA
@@ -188,3 +191,6 @@ interfaces are explicitly not** in v1 (see out-of-scope).
 - The engine runs as **multiple instances on multiple Linux servers** sharing a common
   file area and a PostgreSQL primary/standby cluster; scale is achieved by adding instances.
 - All servers can reach the **shared file-storage area** and the **shared PostgreSQL**.
+- The **management plane (GUI/API)** is served by every instance (instance-agnostic,
+  `BR-HA-012`) behind a **platform-provided stable entry point** (VIP / load balancer,
+  `ASM-19`, `DEP-1e`).

@@ -9,7 +9,7 @@
 !theme plain
 skinparam defaultTextAlignment center
 
-rectangle "**v1 — Real-time Mediation (File + RDBMS), Clustered**\nFetch (SFTP/FTPS) · Collect (shared FS, event-driven) ·\nDecode ASN.1/JSON/XML/DSV/Fixed · Validate (+trailer) ·\n**Single-source** Correlate/Aggregate (event-time) · Dedup ·\nEnrich (+effective-dating) · Normalise · Transform ·\nFan-out distribute to **file + RDBMS**\n(store-and-forward, transactional idempotent load) ·\nReplay/Re-send · In-progress→Done · Archive ·\nSuspense · Reconcile · Audit · Multi-instance HA ·\nScheduled jobs on nominated instance ·\nUsers/RBAC · HTMX GUI (publish-to-prod) · REST API ·\nEmail alerts (ack/resolve) · Health/Prometheus ·\nTemporal config · Optional POPIA/RICA" as V1 #E8F0FE
+rectangle "**v1 — Real-time Mediation (File + RDBMS), Clustered**\nFetch (SFTP/FTPS) · Collect (shared FS, event-driven) ·\nDecode ASN.1/JSON/XML/DSV/Fixed · Validate (+trailer) · Dedup ·\n**Single-source** Correlate/Aggregate (event-time) ·\nEnrich (+effective-dating) · Normalise · Transform ·\nFan-out distribute to **file + RDBMS**\n(store-and-forward, transactional idempotent load) ·\nReplay/Re-send · In-progress→Done · Archive ·\nSuspense · Reconcile · Audit · Multi-instance HA ·\nScheduled jobs on nominated instance ·\nUsers/RBAC · HTMX GUI (publish-to-prod) · REST API ·\nEmail alerts (ack/resolve) · Health/Prometheus ·\nTemporal config · Optional POPIA/RICA" as V1 #E8F0FE
 
 rectangle "**v2 — Scale-out, Resilience & Extended Alerting**\nAll of v1 + (on v1 seams, §10.6)\n**Cross-source correlation** · **dynamic job lease/failover** ·\n**sync-commit RPO=0 / RPO-RTO** · **event-time format selection** ·\n**dedup pre-filter** · **write-path scale-out (→ tier-1)** ·\nAlerting beyond email (webhook / SNMP / chat) ·\nbroader transports/integrations" as V2 #FFF3CD
 
@@ -26,7 +26,8 @@ V2 -right-> VF
 feeds, running highly-available across multiple Linux servers.
 
 **Must include:**
-- **Real-time, always-on** collection (event-driven, `inotify`) and **multi-instance HA**
+- **Near-real-time, always-on** collection (short-interval directory scan on the shared FS;
+  `inotify` only where a source dir is instance-local, `BR-COL-012`) and **multi-instance HA**
   across Linux servers with distributed file-claim and instance-failover (`BR-COL-012`,
   `BR-HA-*`, `BR-NFR-008/015/020`).
 - Remote acquisition over **SFTP/FTPS**, with already-fetched guarding, plus
@@ -48,7 +49,7 @@ feeds, running highly-available across multiple Linux servers.
   normalisation** (MSISDN/E.164, IMSI, timezone), reformat (`BR-TRN-*`).
 - **Fan-out** distribution to multiple destinations of **mixed kinds** — **file outputs and
   RDBMS load** (transactional, idempotent, schema-validated) — with atomic output, routing,
-  **store-and-forward**, gap-free output sequencing, operator **re-send**, and
+  **bounded store-and-forward**, gap-detectable output sequencing, operator **re-send**, and
   **controlled full-file replay** (dedup-override, subset of destinations) (`BR-DST-*`,
   `BR-ERR-009/010`).
 - Reconciliation and audit (`BR-REC-*`, `BR-AUD-*`).

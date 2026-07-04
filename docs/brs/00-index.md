@@ -3,9 +3,9 @@
 > **Project:** baasparse (Afrikaans *baas-parse* → "boss-parse")
 > **Type:** Telco Mediation Engine
 > **Document class:** Business Requirements Specification (BRS)
-> **Status:** Draft `v0.1`
+> **Status:** Draft `v0.3` (gap reviews closed: two passes + verification round, [[13-gap-review-decisions]] — v1 tier‑3/tier‑2 scope)
 > **Owner:** pgvanniekerk
-> **Last updated:** 2026-07-03
+> **Last updated:** 2026-07-04
 
 ---
 
@@ -21,7 +21,7 @@ a design decision made here.
 baasparse is a **Telco mediation engine**: the layer that sits between the network /
 source systems that *produce usage records* and the downstream systems that *consume*
 them (billing, revenue assurance, fraud, analytics). Its job is to **collect, decode,
-validate, correlate, deduplicate, enrich, transform, and distribute** usage records
+validate, deduplicate, correlate, enrich, transform, and distribute** usage records
 reliably, losslessly, and auditably.
 
 ## 2. How to read this pack
@@ -43,6 +43,7 @@ independently. Read in order:
 | 10 | [[10-roadmap]] | Release plan (v1 mediation incl. RDBMS load, v2 extended alerting) |
 | 11 | [[11-glossary]] | Telco & project terminology |
 | 12 | [[12-traceability]] | Requirement → driver → release mapping |
+| 13 | [[13-gap-review-decisions]] | Gap-review dispositions (v1 fixes; deferrals with mitigations) |
 
 ## 3. Requirement identifier scheme
 
@@ -95,8 +96,8 @@ package "Source Systems\n(Network Elements)" as SRC {
 package "baasparse\nMediation Engine" as MED #E8F0FE {
   [Collect] --> [Decode]
   [Decode] --> [Validate]
-  [Validate] --> [Correlate / Dedup]
-  [Correlate / Dedup] --> [Enrich]
+  [Validate] --> [Dedup / Correlate]
+  [Dedup / Correlate] --> [Enrich]
   [Enrich] --> [Transform]
   [Transform] --> [Distribute]
 }

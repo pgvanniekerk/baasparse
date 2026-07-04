@@ -32,10 +32,11 @@ if (valid?) then (no)
   stop
 else (yes)
 endif
+:**Deduplicate** — drop records already
+  seen (by configured key), before
+  they can contribute to collation;
 :**Correlate** — join partial/related
   records into logical records;
-:**Deduplicate** — drop records already
-  seen (by configured key);
 :**Enrich** — augment with reference
   lookups;
 :**Transform** — project, convert,
@@ -54,8 +55,8 @@ stop
 | Collect | Take ownership of an input file exactly once | File claim / lock; sequence & duplicate-file checks |
 | Decode | Turn raw bytes into structured records | Format-specific parser; reject on decode failure |
 | Validate | Enforce structural & business correctness | Rule set; suspense on failure |
+| Deduplicate | Ensure each event counted once — **before** it can contribute to correlation/aggregation (`BR-DUP-005`) | Dedup key + retention window |
 | Correlate | Assemble complete logical records from parts | Correlation key & time window |
-| Deduplicate | Ensure each event counted once | Dedup key + retention window |
 | Enrich | Add context (lookups, derived reference data) | Reference data in PostgreSQL |
 | Transform | Shape records for consumers | Declarative transformation rules |
 | Distribute | Deliver to the right consumer in the right format | Routing rules; atomic output |
@@ -77,14 +78,14 @@ Collected --> Decoded
 Decoded --> Suspended : decode/validate fail
 Decoded --> Validated
 Validated --> Suspended : rule fail
-Validated --> Collating : correlate / aggregate
-Validated --> Deduplicated : pass-through\n(no collation)
+Validated --> Deduplicated : dedup check\n(before collation, BR-DUP-005)
+Deduplicated --> Discarded : duplicate / filtered out
+Deduplicated --> Collating : correlate / aggregate
+Deduplicated --> Enriched : pass-through\n(no collation)
 Collating --> Collating : awaiting window close\n(open working set, persisted)
-Collating --> Deduplicated : window complete → emit\nlogical/aggregate record\n(N inputs → 1 output)
+Collating --> Enriched : window complete → emit\nlogical/aggregate record\n(N inputs → 1 output)
 Collating --> Suspended : incomplete at timeout\n(policy = suspend)
 Collating --> Discarded : incomplete at timeout\n(policy = discard)
-Deduplicated --> Discarded : duplicate / filtered out
-Deduplicated --> Enriched
 Enriched --> Transformed
 Transformed --> Distributed
 Distributed --> [*]
@@ -103,10 +104,12 @@ record is accounted for as *contributed-to-an-emitted-aggregate*, *delivered*, *
 
 ## 5.3 File collection sequence (real-time, multi-instance)
 
-Any instance in the cluster may see a new file. Real-time detection (`inotify`) triggers a
-**distributed claim** in PostgreSQL (a row-level `SELECT … FOR UPDATE SKIP LOCKED` claim
-with a heartbeat lease) so exactly one instance processes it; content is streamed from the
-shared disk (never copied into PostgreSQL).
+Any instance in the cluster may see a new file. On the shared file area, detection is a
+**short-interval directory scan** (cross-host `inotify` is unreliable — it does not see other
+hosts' writes; `inotify` is used only for instance-local dirs, `BR-COL-012`). Detection
+triggers a **distributed claim** in PostgreSQL (a row-level `SELECT … FOR UPDATE SKIP LOCKED`
+claim with a heartbeat lease) so exactly one instance processes it; content is streamed from
+the shared disk (never copied into PostgreSQL).
 
 ```plantuml
 @startuml collect-sequence
@@ -118,7 +121,7 @@ database "PostgreSQL\n(claims/state/audit)" as DB
 participant "Pipeline" as PIPE
 
 SRC -> DIR : drop file (atomic move / done-marker)
-DIR -> COL : filesystem event (inotify)\n[+ safety-net scan]
+DIR -> COL : directory scan detects file\n[shared FS; inotify only if dir is local]
 COL -> DB : attempt **file claim / lease**
 alt claim not acquired (another instance owns it)
   COL -> COL : ignore — owned elsewhere
@@ -210,7 +213,10 @@ end note
 - A file is **moved to "in-progress" when processing begins**, and reaches **"done" only
   once every record has been delivered to _all_ configured endpoints** (`BR-COL-009`,
   `BR-DST-010`). A file with an unavailable destination stays in-progress and is retried
-  (store-and-forward) — output is never lost.
+  (store-and-forward) — output is never lost. Under the *divert* overflow policy, an
+  endpoint's output may instead be recorded as **diverted** (on-disk holding area,
+  re-sendable, reconciled as not-delivered) so the file can still reach "done"
+  (`BR-DST-017`).
 - **In-progress files are recoverable**: on instance failure another instance takes over
   and completes them (`BR-COL-015`, `BR-HA-004`).
 - **Zero-record files** are accepted and recorded, and (if configured) still produce empty
@@ -267,6 +273,16 @@ Two policies must be configured because completeness and real-time are in tensio
 - **Late-arrival policy** — a record for a key already emitted: **emit an adjustment/delta**,
   **suspend**, or **discard** (each audited; dedup, `BR-DUP-*`, guards against double-count).
 
+> **Backfill caveat.** The grace-timeout is **wall-clock**, which misfires during a **catch-up/
+> backfill** (`BR-OPS-013`): a burst of historical records for one key would either reset the
+> timer forever or slam the window shut and spawn spurious late-arrival deltas. During a
+> **declared catch-up**, windowing therefore switches to a **backfill mode** — completing on
+> event-intrinsic triggers where the feed has them, else **holding windows until the key/
+> source backlog drains** and then flushing — rather than closing on wall-clock (`BR-COR-007`).
+> The same discipline applies to **engine/operator-initiated intake stalls** (pause, overflow
+> pause-intake, readiness hold, fail-closed): stalled time does not count toward grace-timeouts —
+> windows are held and resume a fresh grace period when intake resumes (`BR-COR-007`).
+
 ### Time basis — event time vs arrival time (`BR-COR-010`)
 
 Windowing uses **two distinct clocks**, and the distinction matters for correctness:
@@ -287,6 +303,18 @@ A record whose **event time falls inside an already-emitted** window is a **late
 is simply placed in that window by event time. Event-time computation is
 **timezone/DST-aware** (`BR-TRN-010`) so window and group boundaries are unambiguous across
 feeds and across a DST change.
+
+### Config changes while windows are open (`BR-COR-011`)
+
+A window can outlive a **publish-to-production** (`BR-CFG-008`) — per-*file* version binding
+(`BR-CFG-007`) cannot govern something many files feed. Each window is therefore **stamped
+at open with the pipeline-config version that governs it**: appends, completion, and the
+atomic emit all run under that stamped version's semantics, and a publish never mutates an
+open window. Post-publish records joining a still-open window follow its stamped semantics;
+new windows open under the new version (two generations may briefly coexist, each internally
+consistent); a publish may optionally **flush** open windows first for a clean boundary. No
+window ever mixes two versions' semantics, and every emitted aggregate records its
+**governing config version** in lineage.
 
 ### Consequence: records-in ≠ records-out (by design)
 

@@ -169,7 +169,7 @@ entity "Session / Token" as SESS {
 entity "Processed File" as PF {
   identity
   --
-  **file UID** (gap-free)
+  **file UID** (unique, monotonic)
   source, name, checksum, seq
   status (fetched/in-progress/
     done/suspended/quarantined)
@@ -199,7 +199,8 @@ entity "Correlation / Aggregation State" as CST {
   canonical member records (open),
   aggregate accumulators,
   window deadline / completion trigger,
-  contributing count
+  contributing count,
+  governing config version (pinned at open)
 }
 entity "Audit Event" as AUD {
   identity
@@ -256,7 +257,8 @@ entity "Delivery Record" as DLV {
   format, delivered-at,
   state (pending/written/
     written-unconfirmed/
-    delivered/resent/failed)
+    delivered/resent/
+    diverted/failed)
 }
 entity "Alarm" as ALM {
   identity
@@ -329,14 +331,14 @@ USR ||--o{ AUD : actions recorded in
 | **Processed File** | Operational | The record of one input file's journey and reconciliation totals, including its status (incl. **quarantined**, `BR-COL-017`), **processing-attempt count**, and a reference to its **on-disk completion marker** for DB/disk reconciliation (`BR-NFR-017`). |
 | **Suspense Record** | Operational | A quarantined record with stage + reason, awaiting reprocess/abandon. |
 | **Dedup Key Entry** | Operational | A remembered key used to catch duplicates across files/restarts. |
-| **Correlation / Aggregation State** | Operational | The **canonical working set** for open collation windows: pending member records, aggregate accumulators, group/correlation key, completion trigger/deadline, and contributing count. Bodies are dropped on emit; counts/references retained (`BR-COR-006`). |
+| **Correlation / Aggregation State** | Operational | The **canonical working set** for open collation windows: pending member records, aggregate accumulators, group/correlation key, completion trigger/deadline, and contributing count. Each window is **pinned at open to the pipeline-config version that governs it** — a publish never mutates an open window, and the emitted aggregate records its governing version (`BR-COR-011`). Bodies are dropped on emit; counts/references retained (`BR-COR-006`). |
 | **Audit Event** | Operational | Append-only trail of significant events. |
 | **Reconciliation Summary** | Operational | Counts proving completeness for a file/stream/period. |
 | **Fetch Registry** | Operational | Record of already-fetched remote files, guarding against re-download/re-processing. |
 | **File Claim / Lease** | Operational | The distributed lock by which one instance owns a file; expires on instance failure so another can take over (`BR-HA-003/004`). |
 | **Scheduled-Job Lease** *(v2)* | Operational | The same claim/lease mechanism applied to **periodic/singleton cluster jobs** — remote-fetch polling (per source), archiving, feed-liveness — so exactly one instance runs each and it fails over automatically (`BR-HA-010`, `BR-RMT-012`, **v2**). In v1 these jobs run on a **nominated instance** with idempotent backstops; the lease (already used for window emit, `BR-COR-008`) replaces the nomination in v2 (§10.6). |
 | **Config Edit Lock** | Administration | A short-lived lock taken when a user opens a config item for editing, blocking concurrent edits and released on save/cancel/idle-timeout (`BR-CFG-012`, `BR-UI-011`). |
-| **Delivery Record** | Operational | Tracks an output file's delivery state per destination; a Processed File is "done" only when all its Delivery Records succeed (`BR-DST-009/010`). Where a destination has a **receipt callback** (`BR-DST-016`), a written file stays **written-unconfirmed** until the consumer confirms full receipt. |
+| **Delivery Record** | Operational | Tracks an output file's delivery state per destination; a Processed File is "done" only when all its Delivery Records succeed (`BR-DST-009/010`). Where a destination has a **receipt callback** (`BR-DST-016`), a written file stays **written-unconfirmed** until the consumer confirms full receipt. Under the *divert* overflow policy an endpoint's record is marked **`diverted`** — terminal for the done-lifecycle, re-sendable from the on-disk holding area, reconciled as *not delivered* (`BR-DST-017`). |
 | **Alarm** | Operational | A raised operational issue with an **open → acknowledged → resolved** lifecycle, resolvable via a secure email callback link (`BR-OPS-011`). |
 | **Archive Run** | Operational | Record of one archiving operation: files included, archive name/size, destination, outcome. |
 | **User** | Administration | A person or system account that authenticates to the GUI/API; holds role(s) and a securely hashed credential. |
@@ -453,13 +455,24 @@ intent — **shape only**, final schema is a design deliverable:
   without redeploying (`BR-ENR-005`).
 - **Config is never physically deleted** — every configuration record carries
   `effective_from` / `end_date`; "deleting" or superseding sets `end_date`, keeping full
-  history for inspection, restore, and effective-dating (`BR-CFG-009`).
+  history for inspection, restore, and effective-dating (`BR-CFG-009`). The same temporal
+  model supports **backdated correction** (`BR-CFG-014`): a new version whose validity covers
+  a *past* period supersedes the defective one for that period (the old version end-dated,
+  never removed), so effective-dated selection — *"effective at event time, per the latest
+  published config"* — lets suspense reprocessing pick up the fix while audit retains what
+  was previously believed.
+- **Open collation windows are version-pinned** — each window is stamped at open with its
+  governing pipeline-config version; publishes never mutate open windows, no window mixes two
+  versions' semantics, and every emitted aggregate carries its governing version in lineage
+  (`BR-COR-011`, §5.6).
 - **Draft → published lifecycle** — configuration can be edited and then **published to
   production in one action** (`BR-CFG-008`), after which all instances **hot-reload** the
   new active version (`BR-CFG-007`).
 - **Done means fully delivered** — a Processed File reaches `done` only when every fan-out
   endpoint has a successful Delivery Record; unavailable destinations keep it `in-progress`
-  (store-and-forward, `BR-DST-010`).
+  (store-and-forward, `BR-DST-010`). The one recorded exception is a **`diverted`** endpoint
+  under the overflow policy — visible, re-sendable, reconciled as not-delivered
+  (`BR-DST-017`).
 - The model is **format-agnostic after decode**, which is what lets a **file or RDBMS
   Destination** (both v1) — and future targets — plug in without touching upstream stages.
   For an RDBMS target, a record is "delivered" only when its **batch commits** (`BR-DST-013`,

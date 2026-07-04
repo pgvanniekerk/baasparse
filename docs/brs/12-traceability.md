@@ -1,6 +1,6 @@
 # 12 — Requirements Traceability
 
-> Part of the [[00-index|baasparse BRS]]. Previous: [[11-glossary]]  ·  Next: —
+> Part of the [[00-index|baasparse BRS]]. Previous: [[11-glossary]]  ·  Next: [[13-gap-review-decisions]]
 
 This section links **business drivers → capability areas → requirements → release**, so
 every requirement can be justified and every driver shown to be covered. It is the
@@ -22,58 +22,58 @@ control artifact for scope sign-off.
 
 | Capability | Key requirements | Release |
 |------------|------------------|:-------:|
-| Remote acquisition (encrypted-only, scheduled key rotation) | BR-RMT-001..011 | v1 |
+| Remote acquisition (encrypted-only, scheduled key rotation, **fetch backpressure/staging quota**) | BR-RMT-001..011, 013 | v1 |
 | Remote acquisition — **dynamic cluster-coordinated polling** | BR-RMT-012 | **v2** |
 | Collection (real-time, shared FS, in-progress, decompress, integrity, zero-record, poison-file quarantine) | BR-COL-001..017 | v1 |
 | Decoding (incl. XML) | BR-DEC-001..011 | v1 |
 | Decoding — **event-time format selection** | BR-DEC-012 | **v2** |
-| Validation/Screening (incl. header/trailer, TAP3 profile) | BR-VAL-001..007 | v1 |
-| Correlation & aggregation — **single-source** (working set, atomic emit, completion, event-time) | BR-COR-001..008, 010 | v1 |
+| Validation/Screening (incl. header/trailer, **TAP3 profile — conditional M**) | BR-VAL-001..007 | v1 |
+| Correlation & aggregation — **single-source** (working set, atomic emit, completion, event-time, **window version-pinning**, **adjustment/re-emission semantics**) | BR-COR-001..008, 010..012 | v1 |
 | Correlation — **cross-source Correlation Groups** | BR-COR-009 | **v2** |
-| Deduplication (incl. dedup-before-aggregate) | BR-DUP-001..005 | v1 |
-| Enrichment & effective-dating | BR-ENR-001..005 | v1 |
+| Deduplication (incl. dedup-before-aggregate, **retention ≥ retransmission horizon**) | BR-DUP-001..006 | v1 |
+| Enrichment & effective-dating (incl. **readiness precondition**) | BR-ENR-001..006 | v1 |
 | Transformation & normalisation | BR-TRN-001..010 | v1 |
-| Distribution (fan-out, store-and-forward, sequencing, re-send, ordering, receipt callback) | BR-DST-001..006, 008..012, 016 | v1 |
+| Distribution (fan-out, **bounded** store-and-forward incl. **divert semantics**, sequencing, re-send, ordering, receipt callback, **deterministic identity**, **TLS-by-default to RDBMS targets**, **output control records**, **output lifecycle**) | BR-DST-001..006, 008..012, 016..021 | v1 |
 | Distribution (RDBMS load — transactional/idempotent, schema-validated, batched) | BR-DST-007, 013..015 | v1 |
-| Error/Suspense (as-is reprocess, full-file replay, collation replay) | BR-ERR-001..010 | v1 |
-| Reconciliation (input conservation, open/in-flight, adjustment/quarantine, RDBMS-load) | BR-REC-001..009 | v1 |
+| Error/Suspense (as-is reprocess, full-file replay, collation replay, **optional escrow**) | BR-ERR-001..011 | v1 |
+| Reconciliation (input conservation incl. **indeterminate-count**, open/in-flight, adjustment/quarantine, RDBMS-load) | BR-REC-001..009 | v1 |
 | Archiving & retention | BR-ARC-001..010 | v1 |
-| Audit (append-only, **tamper-evident**) | BR-AUD-001..005 | v1 |
-| Configuration (hot-reload, publish, temporal, processing mode, export/import, edit-lock) | BR-CFG-001..012 | v1 |
-| Operability (alerts, feed-liveness, health/Prometheus, log rotation, alarm lifecycle, clock-skew, catch-up) | BR-OPS-001..013 | v1 |
-| High availability & multi-instance | BR-HA-001..009 | v1 |
+| Audit (append-only, **tamper-evident + external anchor**) | BR-AUD-001..005 | v1 |
+| Configuration (hot-reload, publish + **optional four-eyes**, temporal, processing mode, export/import, edit-lock, **backdated correction**) | BR-CFG-001..014 | v1 |
+| Operability (alerts, feed-liveness, health/Prometheus, log rotation, alarm lifecycle + **escalation**, clock-skew, catch-up, **discard/disk-pressure alerts**, **replication-lag alerting**, **state-aware alerting**) | BR-OPS-001..017 | v1 |
+| High availability & multi-instance (incl. **rolling-upgrade schema compat**, **instance-agnostic management plane**) | BR-HA-001..009, 011, 012 | v1 |
 | HA — **dynamic scheduled-job coordination / failover** | BR-HA-010 | **v2** |
-| Regulatory & data protection (optional) | BR-CMP-001..004 | v1 |
-| User mgmt & access control | BR-USR-001..010 | v1 |
+| Regulatory & data protection (optional, incl. **data-subject requests**) | BR-CMP-001..005 | v1 |
+| User mgmt & access control (MFA recorded as future, `BR-USR-011`) | BR-USR-001..011 | v1 |
 | REST API | BR-API-001..008 | v1 |
 | GUI (HTMX, publish-to-prod, edit-lock) | BR-UI-001..011 | v1 |
-| Performance/Integrity/Real-time/HA (incl. write-ceiling ack, async-recovery reconciliation) | BR-NFR-001..017, 020..024, 030..062 *(all except 018, 025)* | v1 |
+| Performance/Integrity/Real-time/HA (incl. write-ceiling ack, async-recovery reconciliation, **fail-closed on state-store loss**) | BR-NFR-001..017, 019, 020..024, 030..062 *(all except 018, 025)* | v1 |
 | Performance — **formal RPO/RTO (sync-commit)** and **dedup read-path pre-filter** | BR-NFR-018, 025 | **v2** |
 
 ## 12.3 Must-have (v1) requirements checklist
 
 These are the `M`-priority items whose completion defines a shippable v1:
 
-- Remote acquisition: BR-RMT-001 (encrypted-only), -002, -003, -004, -005
-- Collection: BR-COL-001, -002, -004, -005, -006, -008, -009, -012, -015, -016, -017
+- Remote acquisition: BR-RMT-001 (encrypted-only), -002, -003, -004, -005, **-013 (fetch backpressure/staging quota)**
+- Collection: BR-COL-001, -002, -003, -004, -005, -006, **-007 (sequence-gap detection — conditional on sequenced feeds)**, -008, -009, -012, -015, -016, -017
 - Decoding: BR-DEC-001, -002, -003, -004, -005, -006, -007, -011 (XML)
-- Validation: BR-VAL-001, -002, -006
-- Correlation/Aggregation: BR-COR-006 (working set/atomic emit), -007 (completion triggers/policies), -008 (cluster window ownership), -010 (event-time basis)
+- Validation: BR-VAL-001, -002, -006, **-007 (TAP3 ingestion profile — conditional on roaming feeds in scope)**
+- Correlation/Aggregation: BR-COR-006 (working set/atomic emit), -007 (completion triggers/policies), -008 (cluster window ownership), -010 (event-time basis), **-011 (window config-version pinning)**, **-012 (adjustment/re-emission semantics)** — all conditional on the pipeline collating (§6.5 note)
 - Deduplication: BR-DUP-001, -002, -003
 - Enrichment: BR-ENR-004 (reference-data lifecycle)
 - Transformation: BR-TRN-001, -002, -003, -004, -006, -010
-- Distribution: BR-DST-001, -002, -003, -007, -008, -010, -013, -014
+- Distribution: BR-DST-001, -002, -003, -007, -008, -010, -013, -014, **-017 (bounded store-and-forward, divert semantics)**, **-018 (deterministic output identity)**, **-019 (TLS-by-default to RDBMS targets)**, **-021 (delivered-output lifecycle)**
 - Error/Suspense: BR-ERR-001, -002, -003, -004, -008, -010
 - Reconciliation: BR-REC-001, -002, -006, -007, -008, -009
 - Archiving: BR-ARC-001, -002, -003, -004, -006
 - Audit: BR-AUD-001, -002, -003, **-004 (append-only/tamper-evident)**
 - Configuration: BR-CFG-001, -002, -007, -008, -009, -010
-- Operability: BR-OPS-001, -002, -003, -007, -008, -009
-- **High availability**: BR-HA-001, -002, -003, -004, -005, -006
+- Operability: BR-OPS-001, -002, -003, -007, -008, -009, **-016 (replication-lag alerting)**
+- **High availability**: BR-HA-001, -002, -003, -004, -005, -006, **-011 (rolling-upgrade schema compatibility)**, **-012 (instance-agnostic management plane)**
 - User mgmt & access: BR-USR-001, -002, -003, -004, -005, -006
 - REST API: BR-API-001, -002, -003, -004
-- GUI (HTMX): BR-UI-001, -002, -003, -004, -005, -010
-- Non-functional: BR-NFR-001, -002, -003, -008, -009, -010, -011, -012, -015, -016 (async recovery via reconciliation), -017, -020, -024 (write-ceiling ack), -030, -033, -040, -041, -050, -052, -053, -054, -060, -062
+- GUI (HTMX): BR-UI-001, -002, -003, **-003b (publish-to-production button)**, -004, -005, -010
+- Non-functional: BR-NFR-001, -002, -003, **-005 (defined v1 volume envelope — now M/design-gating)**, -008, -009, -010, -011, -012, -015, -016 (async recovery via reconciliation), -017, **-019 (fail-closed on state-store loss)**, -020, -024 (write-ceiling ack), -030, -033, -040, -041, -050, -052, -053, -054, -060, -062
 
 > **Deferred to v2** (with v1 seams, see [[10-roadmap]] §10.6): BR-COR-009 (cross-source correlation), BR-HA-010 / BR-RMT-012 (dynamic scheduled-job coordination), BR-NFR-018 (formal RPO/RTO, sync-commit), BR-DEC-012 (event-time format selection), BR-NFR-025 (dedup read-path pre-filter).
 

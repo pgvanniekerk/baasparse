@@ -30,7 +30,7 @@ skinparam rectangle {
 }
 
 rectangle "NETWORK / SOURCE LAYER\nemits raw usage records\n(many formats, high volume)" as NET #FDE7E9
-rectangle "MEDIATION LAYER\n**baasparse**\ncollect · decode · validate · correlate ·\ndedup · enrich · transform · distribute" as MED #E8F0FE
+rectangle "MEDIATION LAYER\n**baasparse**\ncollect · decode · validate · dedup ·\ncorrelate · enrich · transform · distribute" as MED #E8F0FE
 rectangle "BUSINESS / CONSUMER LAYER\nbilling · assurance · fraud ·\nanalytics · settlement" as BIZ #E6F4EA
 
 NET -down-> MED : raw records
