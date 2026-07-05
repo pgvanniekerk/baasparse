@@ -9,11 +9,11 @@
 !theme plain
 skinparam defaultTextAlignment center
 
-rectangle "**v1 — Real-time Mediation (File + RDBMS), Clustered**\nFetch (SFTP/FTPS) · Collect (shared FS, event-driven) ·\nDecode ASN.1/JSON/XML/DSV/Fixed · Validate (+trailer) · Dedup ·\n**Single-source** Correlate/Aggregate (event-time) ·\nEnrich (+effective-dating) · Normalise · Transform ·\nFan-out distribute to **file + RDBMS**\n(store-and-forward, transactional idempotent load) ·\nReplay/Re-send · In-progress→Done · Archive ·\nSuspense · Reconcile · Audit · Multi-instance HA ·\nScheduled jobs on nominated instance ·\nUsers/RBAC · HTMX GUI (publish-to-prod) · REST API ·\nEmail alerts (ack/resolve) · Health/Prometheus ·\nTemporal config · Optional POPIA/RICA" as V1 #E8F0FE
+rectangle "**v1 — Real-time Mediation (File + RDBMS), Clustered**\nFetch (SFTP/FTPS) · Collect (shared FS / S3 object store, event-driven) ·\nDecode ASN.1/JSON/XML/DSV/Fixed · Validate (+trailer) · Dedup ·\n**Single-source** Correlate/Aggregate (event-time) ·\nEnrich (+effective-dating) · Normalise · Transform ·\nFan-out distribute to **file + RDBMS**\n(store-and-forward, transactional idempotent load) ·\nReplay/Re-send · In-progress→Done · Archive ·\nSuspense · Reconcile · Audit · Multi-instance HA ·\nScheduled jobs on nominated instance ·\nUsers/RBAC · HTMX GUI (publish-to-prod) · REST API ·\nEmail alerts (ack/resolve) · Health/Prometheus ·\nTemporal config · Optional POPIA/RICA" as V1 #E8F0FE
 
 rectangle "**v2 — Scale-out, Resilience & Extended Alerting**\nAll of v1 + (on v1 seams, §10.6)\n**Cross-source correlation** · **dynamic job lease/failover** ·\n**sync-commit RPO=0 / RPO-RTO** · **event-time format selection** ·\n**dedup pre-filter** · **write-path scale-out (→ tier-1)** ·\nAlerting beyond email (webhook / SNMP / chat) ·\nbroader transports/integrations" as V2 #FFF3CD
 
-rectangle "**Future — Online Charging & Settlement**\nReal-time session/online charging (Diameter/OCS, 5G CHF) ·\nstreaming/object-store transports ·\nroaming settlement (TAP/RAP) · external IdP" as VF #E6F4EA
+rectangle "**Future — Online Charging & Settlement**\nReal-time session/online charging (Diameter/OCS, 5G CHF) ·\nstreaming transports ·\nroaming settlement (TAP/RAP) · external IdP" as VF #E6F4EA
 
 V1 -right-> V2
 V2 -right-> VF
@@ -36,6 +36,16 @@ feeds, running highly-available across multiple Linux servers.
 - Collection from **shared FS** with once-only cross-cluster capture, duplicate/sequence
   checks, **in-progress → done** lifecycle (done only after all endpoints), configurable
   **zero-record-file** handling, and automatic **archiving** (`BR-COL-*`, `BR-ARC-*`).
+- **Storage backends (incl. object storage) & the cloud-native track**: record files are
+  accessed through a **pluggable storage abstraction** — **local/shared POSIX FS, SFTP/FTPS,
+  and S3-compatible object storage**, configurable **per source and per destination**, with
+  **atomic output on every backend** and files carried as a **storage reference**, never as
+  content in PostgreSQL (`BR-STO-001..007`, `BR-NFR-009`). v1 supports **two storage
+  topologies** and adds a **cloud-native deployment track — Kubernetes + S3 object storage +
+  OpenTelemetry** — in which the object store is the durable substrate and each instance
+  streams its claimed object to **instance-local scratch** (**no ReadWriteMany filesystem
+  required**); this track pulls the **scheduled-job lease** (`BR-HA-010`) into v1 and routes
+  alerts via **Alertmanager** over DB-persisted alarms (`BR-OPS-008`). See **TS §16**.
 - All five decoders: ASN.1, JSON, **XML**, DSV, fixed-position (`BR-DEC-*`).
 - Validation & screening incl. **header/trailer count reconciliation**; suspense &
   **as-is reprocessing** (`BR-VAL-*`, `BR-REC-006`, `BR-ERR-*`).
@@ -130,7 +140,7 @@ transform, fan-out (file + RDBMS), suspense, audit, HA — unchanged.
 
 - **Online / real-time charging**: session-based charging over Diameter (Gy)/RADIUS, and
   5G converged charging (CHF) — a distinct interface from v1's real-time *file* processing.
-- Streaming/object-store transports (Kafka, TCP probes, S3/GCS/Azure Blob).
+- Streaming transports (Kafka, TCP probes); native non-S3-API object stores (e.g. Azure Blob). *(S3-compatible object storage is now **v1** — `BR-STO-002`.)*
 - Interconnect/roaming **settlement generation** (TAP/RAP production, NRTRDE) — building on
   v1's TAP3 **ingestion/validation** (`BR-VAL-007`).
 - **External identity providers** (OIDC/LDAP/SSO) for the management plane.

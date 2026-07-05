@@ -8,7 +8,7 @@
 |---------|-------|---------------|
 | **v1** | **Real-time mediation (file + RDBMS), clustered** | Continuously collect files (local, shared, and remote SFTP/FTPS), decode ASN.1/JSON/XML/DSV/fixed-position, apply configurable transformations, and fan out to **file outputs and/or RDBMS load** — reliably, auditably, and **always-on across multiple Linux servers**. |
 | **v2** | **Extended alerting & integrations** | Add alerting channels beyond email (webhook/SNMP/chat); broaden integration/transport options. |
-| **Future** | **Online charging & settlement** | Real-time session/online charging (Diameter/OCS, 5G converged charging), roaming settlement (TAP/RAP), object-store transports — *not committed here.* |
+| **Future** | **Online charging & settlement** | Real-time session/online charging (Diameter/OCS, 5G converged charging), roaming settlement (TAP/RAP) — *not committed here.* |
 
 ## 4.2 In scope — v1
 
@@ -19,6 +19,18 @@
   instances across multiple Linux servers**, sharing a **common file-storage area** and
   coordinating file ownership via PostgreSQL, with no single point of failure and no
   double-processing.
+- **Pluggable storage backends & two storage topologies** — all record files (input,
+  in-progress, output, archive) are accessed through a **storage abstraction** with
+  pluggable backends: **local/shared POSIX filesystem, SFTP/FTPS (remote), and
+  S3-compatible object storage** (AWS S3, MinIO, Ceph RGW, GCS-interop), configurable
+  **per source and per destination** (a deployment may mix them) (`BR-STO-001/002`). v1
+  supports **two storage topologies**: **on-prem shared POSIX FS**, and **cloud/Kubernetes
+  S3 object storage + instance-local scratch** — the object store is the durable substrate
+  and each instance streams its claimed object to local scratch, so **no ReadWriteMany (RWX)
+  shared filesystem is required** across instances (`BR-STO-003`). A file is always
+  identified by a **storage reference (backend + root + key)**, never by content in
+  PostgreSQL (`BR-NFR-009` preserved); output writes are **atomic on every backend**
+  (`BR-STO-004`). SFTP/FTPS and local/shared filesystem remain **fully in scope**. See TS §16.
 - **Remote acquisition** of input files from remote hosts over **SFTP / FTPS** (encrypted
   transports only — **plain FTP is out of scope** as records carry subscriber data),
   downloaded and stored on the shared area for processing; in v1, **fetch polling runs on a
@@ -109,7 +121,7 @@
 | Automated retrieval of archived files for replay | Operator re-adds manually (`BR-ERR-009`, `ASM-14`) |
 | Online / session-based real-time charging (Diameter/OCS, RADIUS, 5G CHF) | Future — v1 real-time is **file** processing, not online charging |
 | Streaming transport collectors (TCP, Kafka, probes) | Future |
-| Object-store / cloud transports (S3, GCS, Azure Blob) | Future (v1 remote = SFTP/FTPS) |
+| **Native Azure Blob / non-S3-API object stores** | Future — v1 object storage is **S3-compatible only** (AWS S3, MinIO, Ceph RGW, GCS-interop, `BR-STO-002`); S3-compatible object storage is now **v1 in-scope** |
 | Rating / pricing of records | Downstream billing responsibility |
 | Interconnect/roaming settlement (TAP/RAP generation) | Future |
 | Multi-tenancy | Out by design — deployed **per tenant, on-prem** (one tenant per deployment) |
@@ -156,7 +168,7 @@ end note
 
 All stages up to *Distribute* are **format-agnostic**, so a **Destination** is a pluggable
 target: **v1 ships both file and RDBMS (e.g. PostgreSQL) targets**, and the same seam lets
-**future** targets (streaming, object store) be added without a new pipeline. A single
+**future** targets (e.g. streaming) be added without a new pipeline. A single
 stream can **fan out to a mix** of file and RDBMS targets at once (`BR-DST-008`).
 
 ## 4.5 Supported network-element feeds — v1
@@ -188,9 +200,13 @@ interfaces are explicitly not** in v1 (see out-of-scope).
   complete (event-driven), across a cluster of instances; there is no batch-window model.
 - Input files are delivered **completely** (atomic move / done-marker / stability check)
   before collection — see [[09-assumptions-constraints-dependencies]].
-- The engine runs as **multiple instances on multiple Linux servers** sharing a common
-  file area and a PostgreSQL primary/standby cluster; scale is achieved by adding instances.
-- All servers can reach the **shared file-storage area** and the **shared PostgreSQL**.
+- The engine runs as **multiple instances** on a PostgreSQL primary/standby cluster; scale is
+  achieved by adding instances. The durable file substrate depends on topology: **topology A**
+  (on-prem) shares a common POSIX file area across servers; **topology B** (cloud/Kubernetes)
+  uses **S3 object storage with instance-local scratch** — **no shared/RWX filesystem**
+  (`BR-STO-002/003`, TS §16).
+- All instances can reach the **shared PostgreSQL**, and the configured storage backend
+  (the shared file area on topology A, or the S3 endpoint on topology B).
 - The **management plane (GUI/API)** is served by every instance (instance-agnostic,
   `BR-HA-012`) behind a **platform-provided stable entry point** (VIP / load balancer,
   `ASM-19`, `DEP-1e`).

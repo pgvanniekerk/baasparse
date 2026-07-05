@@ -63,6 +63,7 @@ Requirements are identified as `BR-<AREA>-<NNN>` so they can be traced end-to-en
 | `ERR` | Error, suspense & reprocessing |
 | `REC` | Reconciliation & completeness |
 | `ARC` | Archiving & retention of processed files |
+| `STO` | Storage abstraction (SFTP / filesystem / S3 object storage) |
 | `AUD` | Audit & traceability |
 | `CFG` | Configuration & rule management |
 | `OPS` | Operability, monitoring, control |
@@ -148,10 +149,13 @@ These are **given** (see [[09-assumptions-constraints-dependencies]] for the ful
   they are available, not on batch schedules.
 - **Performance and memory efficiency are the top priority** — the engine must process
   large volumes with a bounded, predictable memory footprint (streaming, not load-all).
-- **v1** = file-based mediation, with input from the **local file system** and via
-  **remote fetch (SFTP/FTPS)**; input formats **ASN.1, JSON, XML, DSV,
+- **v1** = file-based mediation, with input from the **local/shared file system**, via
+  **remote fetch (SFTP/FTPS)**, and from **S3-compatible object storage** (pluggable storage
+  backends, `STO` area, TS §16); input formats **ASN.1, JSON, XML, DSV,
   fixed-position**; configurable transformations; **output to files and/or RDBMS load
-  (e.g. PostgreSQL)**; processed-file **archiving**.
+  (e.g. PostgreSQL)**; processed-file **archiving**. Two storage topologies are supported:
+  **on-prem shared POSIX FS**, and **cloud/Kubernetes with S3 + instance-local scratch**
+  (no shared/RWX filesystem required) — the latter with **OpenTelemetry** telemetry.
 - **v1 management plane** = a **built-in user system with RBAC**, an **HTMX GUI hosted in
   the Go app**, and a **REST API** for external systems — sharing one auth model.
 - **v1 correlation** = **single-source** correlation/aggregation on an **event-time** basis;
