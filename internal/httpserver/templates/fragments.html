@@ -1,0 +1,35 @@
+{{define "preview_result"}}
+{{$r := .Result}}
+{{if $r.Err}}
+  <div class="result-err">⚠ {{$r.Err}}</div>
+{{else}}
+  <div class="result-bar">
+    <span class="pill ok">{{$r.Stats.RecordsIn}} in</span>
+    <span class="pill ok">{{$r.Stats.RecordsOut}} out</span>
+    {{if $r.Stats.Suspended}}<span class="pill warn">{{$r.Stats.Suspended}} suspended</span>{{end}}
+    <span class="muted">{{upper .InKind}} → {{upper .OutKind}}</span>
+  </div>
+  <pre class="output">{{$r.Output}}</pre>
+  {{if $r.Suspended}}
+    <details class="susp"><summary>{{len $r.Suspended}} suspended record(s)</summary>
+      <ul>{{range $r.Suspended}}<li class="mono">#{{.Seq}} <b>{{.ReasonCode}}</b> — {{.Detail}}</li>{{end}}</ul>
+    </details>
+  {{end}}
+{{end}}
+{{end}}
+
+{{define "run_result"}}
+{{if .Error}}
+  <div class="result-err">⚠ {{.Error}}</div>
+{{else}}
+  {{$f := .File}}
+  <div class="result-bar">
+    <span class="pill ok">file UID {{$f.FileUID}}</span>
+    <span class="pill ok">{{$f.RecordsIn}} in → {{$f.RecordsOut}} out</span>
+    {{if $f.Suspended}}<span class="pill warn">{{$f.Suspended}} suspended</span>{{end}}
+    <span class="pill ok">{{$f.Status}}</span>
+  </div>
+  <p class="hint">Output written: <span class="mono">{{.OutDir}}/{{$f.OutputName}}</span></p>
+  <pre class="output">{{.Preview}}</pre>
+{{end}}
+{{end}}

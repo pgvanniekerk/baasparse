@@ -1,0 +1,65 @@
+{{define "architecture"}}<!doctype html>
+<html lang="en">{{template "head" .}}
+<body class="app">
+{{template "nav" .}}
+<main class="content">
+  <header class="topbar">
+    <div><h1>Architecture &amp; roadmap</h1><p class="sub">What this alpha is — and the telco mediation engine it grows into.</p></div>
+  </header>
+
+  <section class="hero">
+    <h2>A high-performance, memory-efficient, configurable mediation layer</h2>
+    <p>baasparse sits between the network elements that <b>produce</b> usage records and the systems that <b>consume</b> them — billing, revenue assurance, fraud, analytics. It collects, decodes, validates, deduplicates, correlates, enriches, transforms and distributes usage records <b>losslessly, and auditably</b>.</p>
+    <div class="guarantees">
+      <div><b>Zero record loss</b><small>every record delivered, discarded, or suspended — always accounted for</small></div>
+      <div><b>No unintended duplication</b><small>idempotent recovery, deterministic output identity</small></div>
+      <div><b>Provable completeness</b><small>input conservation: in = out + suspended + discarded</small></div>
+    </div>
+  </section>
+
+  {{template "flow" .}}
+
+  <section class="grid2">
+    <div class="card">
+      <div class="card-head"><h2>✅ In this alpha</h2><span class="pill ok">running now</span></div>
+      <ul class="checks">
+        <li>HTMX GUI served by the Go app — pipeline setup &amp; visual transform modelling</li>
+        <li>End-to-end <b>DSV → JSON</b> and <b>JSON → DSV</b>, streaming</li>
+        <li>Declarative transforms: project, rename, type-convert, constants, concat</li>
+        <li>Live transform preview before publish</li>
+        <li>Background folder watcher + GUI upload — both run triggers</li>
+        <li>Atomic output, processed-file records, reconciliation counts</li>
+        <li>Full TS-03 PostgreSQL schema deployed (45 tables) — ready for the full engine</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>🎯 Full v1</h2><span class="pill">committed scope</span></div>
+      <div class="capgrid">
+        <span>Remote fetch (SFTP/FTPS)</span><span>ASN.1 / XML / fixed-width decode</span>
+        <span>Validation &amp; screening</span><span>Header/trailer reconciliation</span>
+        <span>Dedup (cross-file)</span><span>Single-source correlate &amp; aggregate</span>
+        <span>Enrichment + effective-dating</span><span>Telco normalise (E.164/IMSI/tz)</span>
+        <span>Fan-out: file + RDBMS load</span><span>Store-and-forward, replay, re-send</span>
+        <span>Suspense &amp; reprocessing</span><span>Archiving &amp; retention</span>
+        <span>Multi-instance HA (claims/leases)</span><span>Tamper-evident audit</span>
+        <span>Users / RBAC / REST API</span><span>Email alerts, health, Prometheus</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card roadmap">
+    <div class="card-head"><h2>Roadmap</h2></div>
+    <div class="rmrow">
+      <div class="rmcol now"><span class="pill ok">alpha</span><h3>Format mediation</h3><p>DSV ⇄ JSON, GUI-driven pipelines &amp; transforms, watcher, reconciliation — on the real schema.</p></div>
+      <div class="rmarrow">→</div>
+      <div class="rmcol"><span class="pill">v1</span><h3>Real-time file mediation, clustered</h3><p>All five decoders, correlate/aggregate, fan-out to file + RDBMS, HA across Linux servers, audit &amp; compliance.</p></div>
+      <div class="rmarrow">→</div>
+      <div class="rmcol"><span class="pill">v2</span><h3>Scale-out &amp; resilience</h3><p>Cross-source correlation, dynamic job failover, RPO=0, event-time format selection, alerting beyond email.</p></div>
+      <div class="rmarrow">→</div>
+      <div class="rmcol"><span class="pill">future</span><h3>Online charging</h3><p>Diameter/OCS, 5G converged charging, roaming settlement (TAP/RAP).</p></div>
+    </div>
+    <p class="hint">Every v2 capability lands on a seam built into v1, so growth toward a tier-1 operator is additive — not a re-architecture.</p>
+  </section>
+</main>
+{{template "foot" .}}
+</body></html>{{end}}

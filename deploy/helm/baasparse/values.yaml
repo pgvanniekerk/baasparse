@@ -1,0 +1,97 @@
+# baasparse Helm values. Defaults target a microk8s dev cluster (bundled MinIO +
+# OTel Collector). For production: point at managed PostgreSQL + S3, disable the
+# bundled minio/otelCollector, and set admin.password / database via a Secret.
+
+image:
+  repository: baasparse
+  tag: dev
+  pullPolicy: IfNotPresent
+
+replicaCount: 3
+nameOverride: ""
+fullnameOverride: ""
+
+# --- application config ---
+port: 8080
+dbSchema: baasparse
+logFormat: json        # json | text
+logOutput: stdout      # stdout (containers) | file
+
+# PostgreSQL (external/managed). Either set database.url, or reference an existing Secret.
+database:
+  url: "postgres://postgres:admin@postgres:5432/baasparseDB?sslmode=disable"
+  existingSecret: ""              # if set, DATABASE_URL is read from this Secret
+  existingSecretKey: DATABASE_URL
+
+# Storage backend: object storage (recommended in K8s — no RWX volume) or posix.
+storage:
+  backend: s3          # s3 | posix
+  s3:
+    endpoint: ""       # defaults to the bundled MinIO service when minio.enabled
+    region: us-east-1
+    bucket: baasparse
+    accessKey: minioadmin
+    secretKey: minioadmin
+    useSSL: false
+    createBucket: true
+
+# OpenTelemetry OTLP endpoint (empty disables export). Defaults to the bundled collector.
+otel:
+  endpoint: ""
+
+# Bootstrap administrator (created by a post-install Job).
+admin:
+  username: admin
+  password: "change-me"
+  displayName: Administrator
+  email: ""
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: nginx
+  host: baasparse.local
+  tls: false
+  clusterIssuer: ""    # cert-manager ClusterIssuer name for automatic TLS
+
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits: { cpu: "1", memory: 512Mi }
+
+# GOMEMLIMIT is set from resources.limits.memory automatically (see deployment).
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile: { type: RuntimeDefault }
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: { drop: ["ALL"] }
+
+terminationGracePeriodSeconds: 45   # > app drain (20s) + HTTP shutdown (10s)
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+autoscaling:
+  enabled: false
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+# --- bundled dev dependencies (disable in production) ---
+minio:
+  enabled: true
+  rootUser: minioadmin
+  rootPassword: minioadmin
+  storage: 2Gi
+
+otelCollector:
+  enabled: true
+  # Downstream exporters (leave blank to only debug-log received telemetry):
+  prometheusRemoteWrite: ""   # e.g. http://kube-prometheus-stack-prometheus:9090/api/v1/write
+  lokiEndpoint: ""            # e.g. http://loki:3100/otlp
+  tempoEndpoint: ""          # e.g. tempo:4317

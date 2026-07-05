@@ -1,0 +1,28 @@
+{{define "login"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · baasparse</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛰️</text></svg>">
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <div class="login-brand"><span class="logo">🛰️</span><div><b>baasparse</b><small>telco mediation engine</small></div></div>
+    <h1>Sign in</h1>
+    {{if .Error}}<div class="result-err">{{.Error}}</div>{{end}}
+    <form method="post" action="/login" class="login-form">
+      <input type="hidden" name="next" value="{{.Next}}">
+      <div class="field">
+        <label>Username</label>
+        <input name="username" value="{{.Username}}" autofocus autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label>Password</label>
+        <input name="password" type="password" autocomplete="current-password" required>
+      </div>
+      <button type="submit" class="btn primary block lg">Sign in</button>
+    </form>
+  </div>
+</body></html>{{end}}

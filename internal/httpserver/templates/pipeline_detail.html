@@ -1,0 +1,73 @@
+{{define "pipeline_detail"}}<!doctype html>
+<html lang="en">{{template "head" .}}
+<body class="app">
+{{template "nav" .}}
+{{$p := .Data.Pipeline}}
+<main class="content">
+  <header class="topbar">
+    <div>
+      <h1>{{$p.Name}}</h1>
+      <p class="sub"><span class="tag">{{upper $p.Input.Kind}}</span> → <span class="tag">{{upper $p.Output.Kind}}</span>
+        {{if $p.Enabled}}<span class="pill ok">enabled</span>{{else}}<span class="pill">paused</span>{{end}}</p>
+    </div>
+    <form method="post" action="/pipelines/{{$p.ID}}/toggle"><button class="btn ghost">{{if $p.Enabled}}Pause{{else}}Enable{{end}}</button></form>
+  </header>
+
+  <section class="grid2">
+    <div class="card">
+      <div class="card-head"><h2>Configuration</h2></div>
+      <dl class="kv">
+        <dt>Input</dt><dd>{{upper $p.Input.Kind}}{{if $p.Input.DSV}} · delim <span class="mono">{{$p.Input.DSV.Delimiter}}</span>{{if $p.Input.DSV.HasHeader}} · header{{end}}{{end}}{{if $p.Input.JSON}} · {{$p.Input.JSON.Mode}}{{end}}</dd>
+        <dt>Output</dt><dd>{{upper $p.Output.Kind}}{{if $p.Output.JSON}} · {{$p.Output.JSON.Mode}}{{end}}{{if $p.Output.DSV}} · delim <span class="mono">{{$p.Output.DSV.Delimiter}}</span>{{end}}</dd>
+        <dt>Transform</dt><dd>{{if $p.Transform.PassThrough}}pass-through (all fields){{else}}{{len $p.Transform.Fields}} mapped field(s){{end}}</dd>
+        <dt>Input dir</dt><dd class="mono">{{if $p.InputDir}}{{$p.InputDir}}{{else}}—{{end}}</dd>
+        <dt>Output dir</dt><dd class="mono">{{if $p.OutputDir}}{{$p.OutputDir}}{{else}}(default){{end}}</dd>
+      </dl>
+      {{if not $p.Transform.PassThrough}}
+      <table class="tbl modeller">
+        <thead><tr><th>Output</th><th>From</th><th>Source / const</th><th>Type</th></tr></thead>
+        <tbody>
+        {{range $p.Transform.Fields}}
+          <tr><td class="mono">{{.Output}}</td><td>{{.Kind}}</td><td class="mono">{{if eq (printf "%s" .Kind) "const"}}{{.Const}}{{else}}{{.Source}}{{end}}</td><td>{{if .Type}}{{.Type}}{{else}}—{{end}}</td></tr>
+        {{end}}
+        </tbody>
+      </table>
+      {{end}}
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Run a file</h2></div>
+      <p class="hint">Upload a sample file to process it through this pipeline. Output is written to the output directory and recorded below.</p>
+      <form id="runform" data-run="/pipelines/{{$p.ID}}/run" enctype="multipart/form-data">
+        <div class="field"><input type="file" name="sample" required></div>
+        <button type="submit" class="btn primary">▶ Process file</button>
+      </form>
+      <div id="run-out" class="preview-out"><div class="muted center">Results appear here.</div></div>
+    </div>
+  </section>
+
+  <div class="card">
+    <div class="card-head"><h2>Processed files</h2></div>
+    {{if .Data.Files}}
+    <table class="tbl">
+      <thead><tr><th>File UID</th><th>Input</th><th>Output</th><th>In→Out</th><th>Status</th><th>When</th></tr></thead>
+      <tbody>
+      {{range .Data.Files}}
+        <tr>
+          <td class="mono">{{.FileUID}}</td>
+          <td class="mono">{{.Name}}</td>
+          <td class="mono">{{.OutputName}}</td>
+          <td>{{.RecordsIn}} → {{.RecordsOut}}{{if .Suspended}} <span class="pill warn">{{.Suspended}}</span>{{end}}</td>
+          <td><span class="pill ok">{{.Status}}</span></td>
+          <td class="muted">{{.CollectedOn.Format "2006-01-02 15:04:05"}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="empty">No files processed by this pipeline yet.</div>
+    {{end}}
+  </div>
+</main>
+{{template "foot" .}}
+</body></html>{{end}}

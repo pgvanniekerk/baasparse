@@ -1,0 +1,63 @@
+{{define "dashboard"}}<!doctype html>
+<html lang="en">{{template "head" .}}
+<body class="app">
+{{template "nav" .}}
+<main class="content">
+  <header class="topbar">
+    <div><h1>Dashboard</h1><p class="sub">Real-time file mediation — collect, decode, transform, distribute.</p></div>
+  </header>
+
+  {{template "flow" .}}
+
+  <section class="cards">
+    <div class="card stat"><div class="stat-n">{{.Data.PipelineCount}}</div><div class="stat-l">Pipelines</div></div>
+    <div class="card stat"><div class="stat-n">{{len .Data.Files}}</div><div class="stat-l">Recent files</div></div>
+    <div class="card stat"><div class="stat-n">{{.Data.RecordsIn}}</div><div class="stat-l">Records in</div></div>
+    <div class="card stat"><div class="stat-n">{{.Data.RecordsOut}}</div><div class="stat-l">Records out</div></div>
+  </section>
+
+  <section class="grid2">
+    <div class="card">
+      <div class="card-head"><h2>Pipelines</h2><a href="/pipelines" class="link">view all →</a></div>
+      {{if .Data.Pipelines}}
+      <table class="tbl">
+        <thead><tr><th>Name</th><th>Flow</th><th>State</th></tr></thead>
+        <tbody>
+        {{range .Data.Pipelines}}
+          <tr>
+            <td><a class="link" href="/pipelines/{{.ID}}">{{.Name}}</a></td>
+            <td><span class="tag">{{upper .Input.Kind}}</span> → <span class="tag">{{upper .Output.Kind}}</span></td>
+            <td>{{if .Enabled}}<span class="pill ok">enabled</span>{{else}}<span class="pill">paused</span>{{end}}</td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+      {{else}}
+      <div class="empty">No pipelines yet. <a class="link" href="/pipelines/new">Create your first pipeline →</a></div>
+      {{end}}
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Recent processed files</h2><a href="/files" class="link">view all →</a></div>
+      {{if .Data.Files}}
+      <table class="tbl">
+        <thead><tr><th>File</th><th>Pipeline</th><th>In→Out</th><th>Status</th></tr></thead>
+        <tbody>
+        {{range .Data.Files}}
+          <tr>
+            <td class="mono">{{.Name}}</td>
+            <td>{{.PipelineName}}</td>
+            <td>{{.RecordsIn}} → {{.RecordsOut}}{{if .Suspended}} <span class="pill warn">{{.Suspended}} susp</span>{{end}}</td>
+            <td><span class="pill ok">{{.Status}}</span></td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+      {{else}}
+      <div class="empty">No files processed yet. Open a pipeline and upload a sample, or drop a file into its input directory.</div>
+      {{end}}
+    </div>
+  </section>
+</main>
+{{template "foot" .}}
+</body></html>{{end}}

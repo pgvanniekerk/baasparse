@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "baasparse.fullname" . }}
+  labels: {{- include "baasparse.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "baasparse.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        {{- include "baasparse.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+      annotations:
+        # Prometheus scrapes each pod's /metrics (OTel Prometheus exporter).
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.port | quote }}
+        prometheus.io/path: "/metrics"
+        # Re-roll pods when config/secret change.
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: baasparse
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--auto-migrate=false"]     # schema applied by the pre-install migrate Job
+          ports:
+            - name: http
+              containerPort: {{ .Values.port }}
+          env:
+            # Instance identity = pod name → distinct claim/lease identity per replica.
+            - name: BAASPARSE_INSTANCE_ID
+              valueFrom:
+                fieldRef: { fieldPath: metadata.name }
+            - name: TMPDIR
+              value: /tmp
+            # GOMEMLIMIT = the container memory limit (bytes) → GC respects the cgroup.
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  containerName: baasparse
+                  resource: limits.memory
+                  divisor: "1"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "baasparse.secretName" . }}
+                  key: {{ .Values.database.existingSecretKey }}
+            {{- if eq .Values.storage.backend "s3" }}
+            - name: BAASPARSE_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "baasparse.fullname" . }}
+                  key: BAASPARSE_S3_SECRET_KEY
+            {{- end }}
+          envFrom:
+            - configMapRef: { name: {{ include "baasparse.fullname" . }} }
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,7 @@
+/data
+/dist
+/baasparse
+docs/**/.obsidian
+.git
+deploy/helm
+*.md

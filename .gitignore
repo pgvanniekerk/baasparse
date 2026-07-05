@@ -1,2 +1,12 @@
 # JetBrains IDE settings
 .idea/
+
+# Obsidian vault settings
+.obsidian/
+
+# Build output
+/baasparse
+/dist/
+
+# Runtime working directories (input/in-progress/done/output)
+/data/

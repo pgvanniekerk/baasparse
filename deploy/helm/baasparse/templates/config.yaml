@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "baasparse.fullname" . }}
+  labels: {{- include "baasparse.labels" . | nindent 4 }}
+data:
+  BAASPARSE_PORT: {{ .Values.port | quote }}
+  BAASPARSE_DB_SCHEMA: {{ .Values.dbSchema | quote }}
+  BAASPARSE_LOG_FORMAT: {{ .Values.logFormat | quote }}
+  BAASPARSE_LOG_OUTPUT: {{ .Values.logOutput | quote }}
+  BAASPARSE_STORAGE_BACKEND: {{ .Values.storage.backend | quote }}
+  {{- if eq .Values.storage.backend "s3" }}
+  BAASPARSE_S3_ENDPOINT: {{ include "baasparse.s3endpoint" . | quote }}
+  BAASPARSE_S3_REGION: {{ .Values.storage.s3.region | quote }}
+  BAASPARSE_S3_BUCKET: {{ .Values.storage.s3.bucket | quote }}
+  BAASPARSE_S3_ACCESS_KEY: {{ .Values.storage.s3.accessKey | quote }}
+  BAASPARSE_S3_USE_SSL: {{ .Values.storage.s3.useSSL | quote }}
+  BAASPARSE_S3_CREATE_BUCKET: {{ .Values.storage.s3.createBucket | quote }}
+  {{- end }}
+  {{- with (include "baasparse.otelEndpoint" .) }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ . | quote }}
+  {{- end }}
+---
+{{/*
+  The chart's own Secret always exists — it holds the bootstrap admin credentials
+  (consumed by the createadmin Job) and, for S3, the object-store secret key
+  (consumed by the Deployment). DATABASE_URL is included ONLY when not using an
+  external DB Secret; when database.existingSecret is set, DATABASE_URL is read
+  from that Secret instead (see baasparse.secretName), but this Secret must still
+  be created for the admin/S3 keys.
+*/}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "baasparse.fullname" . }}
+  labels: {{- include "baasparse.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  {{- if not .Values.database.existingSecret }}
+  DATABASE_URL: {{ .Values.database.url | quote }}
+  {{- end }}
+  {{- if eq .Values.storage.backend "s3" }}
+  BAASPARSE_S3_SECRET_KEY: {{ .Values.storage.s3.secretKey | quote }}
+  {{- end }}
+  ADMIN_USERNAME: {{ .Values.admin.username | quote }}
+  ADMIN_PASSWORD: {{ .Values.admin.password | quote }}
+  ADMIN_DISPLAY: {{ .Values.admin.displayName | quote }}
+  ADMIN_EMAIL: {{ .Values.admin.email | quote }}

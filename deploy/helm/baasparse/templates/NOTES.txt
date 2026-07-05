@@ -1,0 +1,50 @@
+baasparse {{ .Chart.AppVersion }} — release {{ .Release.Name }} installed into namespace {{ .Release.Namespace }}.
+
+Rollout ({{ .Values.replicaCount }} replica{{ if ne (int .Values.replicaCount) 1 }}s{{ end }}):
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "baasparse.fullname" . }}
+
+Jobs run automatically around the release:
+  • pre-install  {{ include "baasparse.fullname" . }}-migrate      — applies the schema
+  • post-install {{ include "baasparse.fullname" . }}-createadmin  — creates the bootstrap admin
+
+Open the GUI:
+{{- if .Values.ingress.enabled }}
+  http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}/
+  (ensure {{ .Values.ingress.host }} resolves to your ingress controller)
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "baasparse.fullname" . }} 8080:{{ .Values.service.port }}
+  then browse http://localhost:8080/
+{{- end }}
+
+Sign in with the bootstrap administrator:
+  username: {{ .Values.admin.username }}
+  password: (from Secret {{ include "baasparse.fullname" . }}, key ADMIN_PASSWORD)
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "baasparse.fullname" . }} \
+    -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d; echo
+
+{{- if eq .Values.admin.password "change-me" }}
+
+  ⚠  admin.password is still the default "change-me". Set a real one:
+       helm upgrade {{ .Release.Name }} <chart> --reuse-values --set admin.password=<strong-secret>
+{{- end }}
+
+Storage backend: {{ .Values.storage.backend }}{{ if eq .Values.storage.backend "s3" }} → {{ include "baasparse.s3endpoint" . }} (bucket {{ .Values.storage.s3.bucket }}){{ if .Values.minio.enabled }} [bundled MinIO — dev only, ephemeral]{{ end }}{{ end }}
+Metrics:  each pod exposes /metrics (Prometheus) on port {{ .Values.port }} (prometheus.io/scrape annotation set).
+{{- with (include "baasparse.otelEndpoint" .) }}
+Telemetry: OTLP → {{ . }}{{ if $.Values.otelCollector.enabled }} [bundled collector]{{ end }}
+{{- end }}
+
+{{- if or .Values.minio.enabled (eq .Values.database.url "postgres://postgres:admin@postgres:5432/baasparseDB?sslmode=disable") }}
+
+Not production-ready as configured:
+{{- if .Values.minio.enabled }}
+  • Bundled MinIO uses ephemeral emptyDir storage — data is lost on pod restart.
+{{- end }}
+{{- if eq .Values.database.url "postgres://postgres:admin@postgres:5432/baasparseDB?sslmode=disable" }}
+  • database.url is the built-in placeholder — point it at a managed PostgreSQL,
+    or set database.existingSecret to reference an external DB Secret.
+{{- end }}
+  See deploy/README.md → "Production" for the managed-PostgreSQL + external-S3 setup.
+{{- end }}

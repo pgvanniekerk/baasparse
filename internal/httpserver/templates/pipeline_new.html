@@ -1,0 +1,124 @@
+{{define "pipeline_new"}}<!doctype html>
+<html lang="en">{{template "head" .}}
+<body class="app">
+{{template "nav" .}}
+<main class="content">
+  <header class="topbar">
+    <div><h1>New pipeline</h1><p class="sub">Define the source format, model the transform, choose the output — preview it live before you save.</p></div>
+    <a class="btn ghost" href="/pipelines">Cancel</a>
+  </header>
+
+  <form id="builder" method="post" action="/pipelines" class="builder">
+    <div class="builder-grid">
+      <!-- LEFT: configuration -->
+      <div class="col">
+        <div class="card">
+          <div class="card-head"><h2>1 · Pipeline</h2></div>
+          <div class="field"><label>Name</label><input name="name" placeholder="voice-cdr-to-json" required></div>
+          <div class="field row">
+            <label class="check"><input type="checkbox" name="enabled" checked> Enabled (watched by the data plane)</label>
+          </div>
+          <div class="field"><label>Input directory <small>(watched)</small></label><input name="input_dir" placeholder="./data/input/voice" class="mono"></div>
+          <div class="field"><label>Output directory</label><input name="output_dir" placeholder="./data/output/voice" class="mono"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>2 · Input format</h2></div>
+          <div class="seg" data-seg="input">
+            <label class="segbtn on"><input type="radio" name="input_kind" value="dsv" checked data-action="kind" data-target="input"> DSV</label>
+            <label class="segbtn"><input type="radio" name="input_kind" value="json" data-action="kind" data-target="input"> JSON</label>
+          </div>
+          <div data-fmt="input-dsv">
+            <div class="field"><label>Delimiter</label>
+              <select name="input_delimiter">
+                <option value="comma">comma ,</option><option value="tab">tab</option>
+                <option value="pipe">pipe |</option><option value="semicolon">semicolon ;</option>
+              </select></div>
+            <div class="field"><label class="check"><input type="checkbox" name="input_has_header" checked> First row is a header</label></div>
+            <div class="field"><label>Columns <small>(if no header, comma-separated)</small></label><input name="input_columns" class="mono" placeholder="msisdn,seconds,cell"></div>
+          </div>
+          <div data-fmt="input-json" hidden>
+            <div class="field"><label>Shape</label>
+              <select name="input_json_mode"><option value="ndjson">NDJSON (one object per line)</option><option value="array">JSON array</option></select></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>3 · Transform</h2>
+            <label class="check"><input type="checkbox" id="passthrough" name="passthrough" data-action="passthrough"> Pass through all fields</label>
+          </div>
+          <p class="hint">Map input fields to output fields. Rename by giving a different output name; convert types; add constants or joined fields.</p>
+          <div id="fields">
+            <table class="tbl modeller">
+              <thead><tr><th>Output field</th><th>Source</th><th>From</th><th>Type</th><th></th></tr></thead>
+              <tbody id="field-rows">
+                {{/* one starter row */}}
+              </tbody>
+            </table>
+            <button type="button" class="btn small" data-action="add-field">+ Add field</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>4 · Output format</h2></div>
+          <div class="seg" data-seg="output">
+            <label class="segbtn"><input type="radio" name="output_kind" value="dsv" data-action="kind" data-target="output"> DSV</label>
+            <label class="segbtn on"><input type="radio" name="output_kind" value="json" checked data-action="kind" data-target="output"> JSON</label>
+          </div>
+          <div data-fmt="output-dsv" hidden>
+            <div class="field"><label>Delimiter</label>
+              <select name="output_delimiter"><option value="comma">comma ,</option><option value="tab">tab</option><option value="pipe">pipe |</option><option value="semicolon">semicolon ;</option></select></div>
+          </div>
+          <div data-fmt="output-json">
+            <div class="field"><label>Shape</label>
+              <select name="output_json_mode"><option value="ndjson">NDJSON (one object per line)</option><option value="array">JSON array</option></select></div>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button type="submit" class="btn primary lg">Create pipeline</button>
+        </div>
+      </div>
+
+      <!-- RIGHT: live preview -->
+      <div class="col">
+        <div class="card sticky">
+          <div class="card-head"><h2>Live preview</h2>
+            <div class="preset">
+              <button type="button" class="btn tiny" data-action="sample" data-kind="dsv">DSV sample</button>
+              <button type="button" class="btn tiny" data-action="sample" data-kind="json">JSON sample</button>
+            </div>
+          </div>
+          <label class="lbl">Sample input</label>
+          <textarea name="sample" id="sample" class="mono sample" rows="8" placeholder="Paste a few sample records, or load a sample above…"></textarea>
+          <button type="button" class="btn primary block" data-action="preview">▶ Preview transform</button>
+          <div id="preview-out" class="preview-out"><div class="muted center">Output appears here.</div></div>
+        </div>
+      </div>
+    </div>
+  </form>
+</main>
+{{template "foot" .}}
+
+<template id="field-row-tpl">
+  <tr class="frow">
+    <td><input name="field_output" class="mono" placeholder="a_number"></td>
+    <td><input name="field_source" class="mono" placeholder="msisdn"></td>
+    <td>
+      <select name="field_kind" data-action="kind-change">
+        <option value="field">input field</option>
+        <option value="const">constant</option>
+        <option value="concat">concat</option>
+      </select>
+    </td>
+    <td>
+      <select name="field_type">
+        <option value="">keep type</option><option value="string">string</option>
+        <option value="integer">integer</option><option value="number">number</option><option value="boolean">boolean</option>
+      </select>
+      <input name="field_const" class="mono const-in" placeholder="constant / 'a','b'" hidden>
+    </td>
+    <td><button type="button" class="btn tiny danger" data-action="remove-field">✕</button></td>
+  </tr>
+</template>
+</body></html>{{end}}

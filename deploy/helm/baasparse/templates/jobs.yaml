@@ -1,0 +1,82 @@
+{{/* Pre-install/upgrade: apply the database schema (expand phase, BR-HA-011). */}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "baasparse.fullname" . }}-migrate
+  labels: {{- include "baasparse.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels: {{- include "baasparse.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["setupdb"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "baasparse.secretName" . }}
+                  key: {{ .Values.database.existingSecretKey }}
+            - name: BAASPARSE_DB_SCHEMA
+              value: {{ .Values.dbSchema | quote }}
+          securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]
+---
+{{/* Post-install/upgrade: create/reset the bootstrap administrator (BR-USR-009). */}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "baasparse.fullname" . }}-createadmin
+  labels: {{- include "baasparse.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels: {{- include "baasparse.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: createadmin
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # $(VAR) is expanded from env (secret-sourced) — password never in the manifest.
+          args:
+            - createadmin
+            - --username
+            - "$(ADMIN_USERNAME)"
+            - --password
+            - "$(ADMIN_PASSWORD)"
+            - --display-name
+            - "$(ADMIN_DISPLAY)"
+            - --email
+            - "$(ADMIN_EMAIL)"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: {{ include "baasparse.secretName" . }}, key: {{ .Values.database.existingSecretKey }} }
+            - name: BAASPARSE_DB_SCHEMA
+              value: {{ .Values.dbSchema | quote }}
+            {{- range $k := (list "ADMIN_USERNAME" "ADMIN_PASSWORD" "ADMIN_DISPLAY" "ADMIN_EMAIL") }}
+            - name: {{ $k }}
+              valueFrom:
+                secretKeyRef: { name: {{ include "baasparse.fullname" $ }}, key: {{ $k }} }
+            {{- end }}
+          securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]

@@ -1,0 +1,36 @@
+{{define "files"}}<!doctype html>
+<html lang="en">{{template "head" .}}
+<body class="app">
+{{template "nav" .}}
+<main class="content">
+  <header class="topbar">
+    <div><h1>Processed files</h1><p class="sub">Every input file the engine has processed, with reconciliation counts (in = out + suspended).</p></div>
+  </header>
+  <div class="card">
+    {{if .Data}}
+    <table class="tbl">
+      <thead><tr><th>File UID</th><th>Correlation</th><th>Pipeline</th><th>Input</th><th>Output</th><th>In</th><th>Out</th><th>Susp</th><th>Status</th><th>When (UTC)</th></tr></thead>
+      <tbody>
+      {{range .Data}}
+        <tr>
+          <td class="mono">{{.FileUID}}</td>
+          <td class="mono" title="correlation id / trace key for this file (search in Grafana/Loki)">#{{.FileUID}}</td>
+          <td>{{.PipelineName}}</td>
+          <td class="mono">{{.Name}}</td>
+          <td class="mono">{{.OutputName}}</td>
+          <td>{{.RecordsIn}}</td>
+          <td>{{.RecordsOut}}</td>
+          <td>{{if .Suspended}}<span class="pill warn">{{.Suspended}}</span>{{else}}0{{end}}</td>
+          <td><span class="pill ok">{{.Status}}</span></td>
+          <td class="muted">{{.CollectedOn.Format "2006-01-02 15:04:05"}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="empty">No files processed yet.</div>
+    {{end}}
+  </div>
+</main>
+{{template "foot" .}}
+</body></html>{{end}}

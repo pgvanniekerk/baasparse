@@ -1,0 +1,52 @@
+{{define "head"}}<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>baasparse — mediation engine</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛰️</text></svg>">
+</head>{{end}}
+
+{{define "nav"}}
+<aside class="sidebar">
+  <div class="brand"><span class="logo">🛰️</span><div><b>baasparse</b><small>mediation engine</small></div></div>
+  <nav>
+    <a href="/" class="{{if eq .Active "dashboard"}}on{{end}}"><span>▤</span> Dashboard</a>
+    <a href="/pipelines" class="{{if eq .Active "pipelines"}}on{{end}}"><span>⇄</span> Pipelines</a>
+    <a href="/files" class="{{if eq .Active "files"}}on{{end}}"><span>▦</span> Processed files</a>
+    <a href="/architecture" class="{{if eq .Active "architecture"}}on{{end}}"><span>◈</span> Architecture</a>
+  </nav>
+  <div class="sidebar-foot">
+    <span class="pill ok">alpha</span>
+    <small>DSV ⇄ JSON</small>
+  </div>
+  {{if .User}}
+  <div class="userbox">
+    <div class="uinfo"><span class="uava">{{if .User.DisplayName}}{{slice .User.DisplayName 0 1}}{{else}}{{slice .User.Username 0 1}}{{end}}</span>
+      <div><b>{{if .User.DisplayName}}{{.User.DisplayName}}{{else}}{{.User.Username}}{{end}}</b><small>{{range .User.Roles}}{{.}} {{else}}user{{end}}</small></div></div>
+    <a class="logout" href="/logout">Sign out</a>
+  </div>
+  {{end}}
+</aside>
+{{end}}
+
+{{define "flow"}}
+<div class="flow">
+  <div class="stage on"><b>Collect</b><small>watch &amp; claim</small></div>
+  <div class="arrow">→</div>
+  <div class="stage on"><b>Decode</b><small>DSV / JSON</small></div>
+  <div class="arrow">→</div>
+  <div class="stage"><b>Validate</b><small>rules</small></div>
+  <div class="arrow">→</div>
+  <div class="stage on"><b>Transform</b><small>map &amp; convert</small></div>
+  <div class="arrow">→</div>
+  <div class="stage on"><b>Distribute</b><small>file out</small></div>
+</div>
+{{end}}
+
+{{define "foot"}}
+<footer class="foot">
+  <span>baasparse · telco mediation engine · alpha build</span>
+  <span>integrity › performance › auditability › configurability › operability</span>
+</footer>
+{{end}}
