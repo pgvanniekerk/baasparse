@@ -1,0 +1,42 @@
+{{define "datasources"}}<!doctype html>
+<html lang="en">{{template "head" .}}
+<body class="app">
+{{template "nav" .}}
+<main class="content">
+  <header class="topbar">
+    <div><h1>Datasources</h1><p class="sub">Reusable storage connections. Set one up once, test it, then select it when you create a pipeline (the bucket / working folders are chosen per pipeline).</p></div>
+    <a class="btn primary" href="/datasources/new">+ New datasource</a>
+  </header>
+
+  {{if .Data}}
+  <div class="card">
+    <table class="tbl">
+      <thead><tr><th>Name</th><th>Kind</th><th>Connection</th><th>Created</th><th></th></tr></thead>
+      <tbody>
+      {{range .Data}}
+        <tr>
+          <td><b>{{.Name}}</b></td>
+          <td><span class="tag">{{upper .Kind}}</span></td>
+          <td class="mono muted">{{if eq .Kind "s3"}}{{.S3.Endpoint}}{{if .S3.Region}} · {{.S3.Region}}{{end}}{{else}}{{if .Root}}{{.Root}}{{else}}—{{end}}{{end}}</td>
+          <td class="muted">{{.CreatedOn.Format "2006-01-02 15:04"}}</td>
+          <td class="right">
+            <form method="post" action="/datasources/{{.ID}}/delete" onsubmit="return confirm('Remove datasource “{{.Name}}”? Pipelines already using it keep working.');">
+              <button type="submit" class="btn tiny danger">Remove</button>
+            </form>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="card empty-lg">
+    <div class="empty-ico">◈</div>
+    <h2>No datasources yet</h2>
+    <p>A datasource is a place files live — a local working folder or an S3/MinIO endpoint. Create one, test the connection, then pick it when building a pipeline.</p>
+    <a class="btn primary" href="/datasources/new">+ Create your first datasource</a>
+  </div>
+  {{end}}
+</main>
+{{template "foot" .}}
+</body></html>{{end}}

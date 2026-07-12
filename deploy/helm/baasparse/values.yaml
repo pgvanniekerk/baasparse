@@ -17,6 +17,23 @@ dbSchema: baasparse
 logFormat: json        # json | text
 logOutput: stdout      # stdout (containers) | file
 
+# AES-GCM key that encrypts stored source/datasource credentials (S3 secret keys, SFTP
+# passwords/keys). DELIBERATELY EMPTY — the chart refuses to render without it.
+#
+# It is not shipped with a default because a default is a published key: every
+# deployment would encrypt its credentials with a value anyone can read. And it must
+# never be rotated casually — credentials encrypted with the old key cannot be
+# decrypted with a new one, and there is no recovery.
+#
+# It must also be the SAME value on every replica. With no key set, the app derives
+# one per pod, so a credential encrypted by one replica is unreadable by the next —
+# a corruption that surfaces later, on the pod that did not write it. That is why a
+# missing key is a hard error here rather than a fallback.
+#
+# Supply it from a Secret in production; locally, from deploy/local/values.local.yaml
+# (gitignored). Generate: openssl rand -base64 32
+secretKey: ""
+
 # PostgreSQL (external/managed). Either set database.url, or reference an existing Secret.
 database:
   url: "postgres://postgres:admin@postgres:5432/baasparseDB?sslmode=disable"
@@ -35,11 +52,56 @@ storage:
     useSSL: false
     createBucket: true
 
+# Local filesystem mount for POSIX datasources. Mounts a host directory into the app
+# pods as a writable volume so pipelines can use a "local filesystem" datasource whose
+# working directory lives under mountPath. On a single-node cluster all replicas share
+# the one host directory (coordination is via Postgres claims, so this is safe). For a
+# real multi-node cluster use an RWX PersistentVolume (NFS/CephFS) instead of hostPath.
+posixData:
+  enabled: true
+  hostPath: /home/pgenium/baasparse/file_data
+  mountPath: /data/file_data
+  # Run the container as this uid/gid so app-created files under the hostPath are owned
+  # by the host user (kubelet does NOT apply fsGroup to hostPath). 1000 = the host owner
+  # (pgenium) on this dev box. Overrides the image's default 65532; still non-root.
+  runAsUser: 1000
+
+# Hot-path performance tuning (0 = engine default). Buffer sizes trade memory for
+# fewer syscalls / S3 round-trips; maxConcurrentFiles is the per-pod watcher worker
+# pool (files processed concurrently — CPU benefit caps at resources.limits.cpu).
+perf:
+  readBufferBytes: 0        # default 64KiB
+  writeBufferBytes: 0       # default 64KiB
+  maxConcurrentFiles: 4
+
+# Decompression-bomb guards for tar.gz inputs (0 = engine default). These bound the
+# DECOMPRESSED stream, which has no relation to the object's size on disk — a 400KB
+# archive can hide 200MB of zeros. A breach quarantines the archive with
+# ARCHIVE_LIMIT_EXCEEDED. Safety rails, not sizing policy: set well above legitimate
+# traffic.
+archive:
+  maxMembers: 0             # default 100,000 files per archive
+  maxMemberBytes: 0         # default 32GiB decompressed, per member
+  maxTotalBytes: 0          # default 256GiB decompressed, per archive
+
 # OpenTelemetry OTLP endpoint (empty disables export). Defaults to the bundled collector.
 otel:
   endpoint: ""
 
-# Bootstrap administrator (created by a post-install Job).
+# Database bootstrap Jobs (schema migration + admin creation).
+#
+# DISABLED by default: at a client site the schema and the bootstrap admin are
+# provisioned deliberately by a devops engineer during initial deployment
+# (`baasparse setupdb` and `baasparse createadmin`), decoupled from `helm install`
+# so the app rollout never mutates the database. The app also runs with
+# --auto-migrate=false. Enable these for a self-contained dev cluster only.
+jobs:
+  migrate:
+    enabled: false      # pre-install Job that runs `setupdb` (applies the schema)
+  createAdmin:
+    enabled: false      # post-install Job that runs `createadmin`
+
+# Bootstrap administrator (used only by the createadmin Job when jobs.createAdmin.enabled).
 admin:
   username: admin
   password: "change-me"
@@ -94,4 +156,4 @@ otelCollector:
   # Downstream exporters (leave blank to only debug-log received telemetry):
   prometheusRemoteWrite: ""   # e.g. http://kube-prometheus-stack-prometheus:9090/api/v1/write
   lokiEndpoint: ""            # e.g. http://loki:3100/otlp
-  tempoEndpoint: ""          # e.g. tempo:4317
+  tempoEndpoint: "tempo.observability:4317"   # Tempo (deploy/observability/tempo.yaml) — OTLP gRPC traces

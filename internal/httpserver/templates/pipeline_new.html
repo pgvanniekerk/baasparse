@@ -4,89 +4,240 @@
 {{template "nav" .}}
 <main class="content">
   <header class="topbar">
-    <div><h1>New pipeline</h1><p class="sub">Define the source format, model the transform, choose the output — preview it live before you save.</p></div>
+    <div><h1>New pipeline</h1><p class="sub">Step through the source, declare the input fields, then map them to the output — preview it live before you save.</p></div>
     <a class="btn ghost" href="/pipelines">Cancel</a>
   </header>
 
-  <form id="builder" method="post" action="/pipelines" class="builder">
+  <form id="builder" method="post" action="/pipelines" class="builder wizard">
     <div class="builder-grid">
-      <!-- LEFT: configuration -->
+      <!-- LEFT: stepped configuration -->
       <div class="col">
-        <div class="card">
-          <div class="card-head"><h2>1 · Pipeline</h2></div>
-          <div class="field"><label>Name</label><input name="name" placeholder="voice-cdr-to-json" required></div>
-          <div class="field row">
-            <label class="check"><input type="checkbox" name="enabled" checked> Enabled (watched by the data plane)</label>
-          </div>
-          <div class="field"><label>Input directory <small>(watched)</small></label><input name="input_dir" placeholder="./data/input/voice" class="mono"></div>
-          <div class="field"><label>Output directory</label><input name="output_dir" placeholder="./data/output/voice" class="mono"></div>
-        </div>
+        <ol class="stepper" id="stepper">
+          <li class="on" data-action="goto-step" data-step="1"><b>1</b> Source</li>
+          <li data-action="goto-step" data-step="2"><b>2</b> Input</li>
+          <li data-action="goto-step" data-step="3"><b>3</b> Destinations</li>
+        </ol>
 
-        <div class="card">
-          <div class="card-head"><h2>2 · Input format</h2></div>
-          <div class="seg" data-seg="input">
-            <label class="segbtn on"><input type="radio" name="input_kind" value="dsv" checked data-action="kind" data-target="input"> DSV</label>
-            <label class="segbtn"><input type="radio" name="input_kind" value="json" data-action="kind" data-target="input"> JSON</label>
+        <!-- ===================== STEP 1 · SOURCE ===================== -->
+        <section class="step" data-step="1">
+          <div class="card">
+            <div class="card-head"><h2>Pipeline</h2></div>
+            <div class="field"><label>Name</label><input name="name" placeholder="voice-cdr-to-json" required></div>
+            <div class="field row"><label class="check"><input type="checkbox" name="enabled" checked> Enabled (watched by the data plane)</label></div>
           </div>
-          <div data-fmt="input-dsv">
-            <div class="field"><label>Delimiter</label>
-              <select name="input_delimiter">
-                <option value="comma">comma ,</option><option value="tab">tab</option>
-                <option value="pipe">pipe |</option><option value="semicolon">semicolon ;</option>
-              </select></div>
-            <div class="field"><label class="check"><input type="checkbox" name="input_has_header" checked> First row is a header</label></div>
-            <div class="field"><label>Columns <small>(if no header, comma-separated)</small></label><input name="input_columns" class="mono" placeholder="msisdn,seconds,cell"></div>
-          </div>
-          <div data-fmt="input-json" hidden>
-            <div class="field"><label>Shape</label>
-              <select name="input_json_mode"><option value="ndjson">NDJSON (one object per line)</option><option value="array">JSON array</option></select></div>
-          </div>
-        </div>
 
-        <div class="card">
-          <div class="card-head"><h2>3 · Transform</h2>
-            <label class="check"><input type="checkbox" id="passthrough" name="passthrough" data-action="passthrough"> Pass through all fields</label>
+          <div class="card">
+            <div class="card-head"><h2>Where do files come from?</h2>
+              <a class="btn tiny" href="/datasources/new" target="_blank">+ New datasource</a>
+            </div>
+            {{if not .Data.Datasources}}
+            <p class="hint">No datasources yet. <a class="link" href="/datasources/new" target="_blank">Create one</a> — a local folder or an S3/MinIO connection — then build a pipeline on it. The connection (endpoint, credentials, root folder) lives on the datasource; here you just pick it and add anything pipeline-specific, like an S3 bucket.</p>
+            {{end}}
+
+            <div class="field">
+              <label>Input datasource</label>
+              <div class="ds-select-row">
+                <button type="button" class="ds-select-btn" data-action="open-ds-picker" data-target="input">
+                  <span class="ds-selected" data-ds-label="input">Choose a datasource…</span><span class="ds-caret">▾</span>
+                </button>
+              </div>
+              <input type="hidden" name="datasource_id" value="">
+            </div>
+            <div class="ds-detail" data-ds-detail="input" hidden>
+              <div class="ds-conn mono muted" data-ds-conn="input"></div>
+              <div data-ds-bucket hidden>
+                <div class="field"><label>Bucket <small>(for this pipeline)</small></label><input name="ds_bucket" class="mono" placeholder="cdr-drop"></div>
+                <div class="field row"><label class="check"><input type="checkbox" name="ds_create_bucket"> Create bucket if missing</label></div>
+              </div>
+            </div>
+
+            <div class="field">
+              <label>Write output &amp; done to <small>(optional — same as input unless set)</small></label>
+              <div class="ds-select-row">
+                <button type="button" class="ds-select-btn" data-action="open-ds-picker" data-target="output">
+                  <span class="ds-selected" data-ds-label="output">Same as input datasource</span><span class="ds-caret">▾</span>
+                </button>
+                <button type="button" class="btn tiny ghost" data-action="clear-ds" data-target="output" title="reset to same as input">✕</button>
+              </div>
+              <input type="hidden" name="output_datasource_id" value="">
+            </div>
+            <div class="ds-detail" data-ds-detail="output" hidden>
+              <div class="ds-conn mono muted" data-ds-conn="output"></div>
+              <div data-ds-output-bucket hidden>
+                <div class="field"><label>Output bucket</label><input name="ds_output_bucket" class="mono" placeholder="(defaults to input bucket)"></div>
+              </div>
+            </div>
+
+            <p class="hint">Each pipeline gets its own <span class="mono">&lt;name&gt;/input · in-progress · done · quarantine · output</span> folders automatically. Pick a different output datasource to read from one place and deliver to another (e.g. read S3 → write local FS).</p>
           </div>
-          <p class="hint">Map input fields to output fields. Rename by giving a different output name; convert types; add constants or joined fields.</p>
-          <div id="fields">
+
+          <!-- datasource picker (searchable; shared by the input + output selectors) -->
+          <div class="ds-modal" id="ds-modal" hidden data-target="input">
+            <div class="ds-modal-backdrop" data-action="close-ds-picker"></div>
+            <div class="ds-modal-box">
+              <div class="ds-modal-head"><b>Select a datasource</b><button type="button" class="ds-modal-x" data-action="close-ds-picker">✕</button></div>
+              <input type="search" class="ds-modal-search" placeholder="Search by name…" data-action="ds-search" autocomplete="off">
+              <ul class="ds-modal-list" id="ds-modal-list">
+                {{range .Data.Datasources}}
+                <li class="ds-opt" data-action="choose-ds" data-id="{{.ID}}" data-kind="{{.Kind}}" data-name="{{.Name}}" data-conn="{{if eq .Kind "s3"}}{{.S3.Endpoint}}{{if .S3.Region}} · {{.S3.Region}}{{end}}{{else}}{{.Root}}{{end}}">
+                  <span class="ds-opt-name">{{.Name}}</span><span class="tag">{{upper .Kind}}</span>
+                  <span class="ds-opt-conn mono muted">{{if eq .Kind "s3"}}{{.S3.Endpoint}}{{else}}{{.Root}}{{end}}</span>
+                </li>
+                {{end}}
+              </ul>
+              {{if not .Data.Datasources}}<p class="hint" style="padding:0 16px 16px">No datasources configured. <a class="link" href="/datasources/new" target="_blank">Create one →</a></p>{{end}}
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h2>Lifecycle &amp; disposition</h2></div>
+            <div class="grid2">
+              <div class="field"><label>Done disposition</label>
+                <select name="disposition">
+                  <option value="done">move to done</option>
+                  <option value="delete">delete source (keep marker)</option>
+                  <option value="leaveMarked">leave in place, marked</option>
+                </select></div>
+              <div class="field"><label>Poll interval <small>(seconds, 0=default)</small></label><input name="poll_seconds" class="mono" placeholder="0"></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h2>Archiving <small>(optional)</small></h2>
+              <label class="check"><input type="checkbox" name="archive_enabled" data-action="archive-toggle"> Enable</label>
+            </div>
+            <div id="archive-body" hidden>
+              <div class="grid2">
+                <div class="field"><label>Archive after <small>(days)</small></label><input name="archive_age_days" class="mono" placeholder="30"></div>
+                <div class="field"><label>Compression</label>
+                  <select name="archive_compression">
+                    <option value="gzip">gzip</option><option value="zip">zip</option><option value="tar_gz">tar.gz</option>
+                  </select></div>
+                <div class="field"><label>Schedule <small>(seconds, 0=default)</small></label><input name="archive_schedule_seconds" class="mono" placeholder="0"></div>
+              </div>
+              <div class="field row"><label class="check"><input type="checkbox" name="archive_include_quarantined"> Include quarantined files</label></div>
+              <div class="field"><label>Destination backend</label>
+                <select name="archive_dest_backend" data-action="archive-backend">
+                  <option value="posix">Local</option><option value="s3">S3</option>
+                </select></div>
+              <div data-archdest="posix">
+                <div class="field"><label>Destination root</label><input name="archive_dest_root" class="mono" placeholder="./data/archive"></div>
+              </div>
+              <div data-archdest="s3" hidden>
+                <div class="grid2">
+                  <div class="field"><label>Endpoint</label><input name="archive_dest_s3_endpoint" class="mono"></div>
+                  <div class="field"><label>Region</label><input name="archive_dest_s3_region" class="mono"></div>
+                  <div class="field"><label>Bucket</label><input name="archive_dest_s3_bucket" class="mono"></div>
+                  <div class="field"><label>Access key</label><input name="archive_dest_s3_access_key" class="mono"></div>
+                  <div class="field"><label>Secret key</label><input type="password" name="archive_dest_s3_secret_key" class="mono" autocomplete="new-password"></div>
+                </div>
+                <div class="field row"><label class="check"><input type="checkbox" name="archive_dest_s3_use_ssl" checked> Use TLS</label></div>
+                <div class="field row"><label class="check"><input type="checkbox" name="archive_dest_s3_create_bucket"> Create bucket if missing</label></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="wiznav"><span></span><button type="button" class="btn primary" data-action="next-step">Next: Input →</button></div>
+        </section>
+
+        <!-- ===================== STEP 2 · INPUT ===================== -->
+        <section class="step" data-step="2" hidden>
+          <div class="card">
+            <div class="card-head"><h2>Input format</h2></div>
+            <div class="seg" data-seg="input">
+              <label class="segbtn on"><input type="radio" name="input_kind" value="dsv" checked data-action="kind" data-target="input"> DSV</label>
+              <label class="segbtn"><input type="radio" name="input_kind" value="json" data-action="kind" data-target="input"> JSON</label>
+              <label class="segbtn"><input type="radio" name="input_kind" value="xml" data-action="kind" data-target="input"> XML</label>
+            </div>
+            <div data-fmt="input-dsv">
+              <div class="field"><label>Delimiter</label>
+                <select name="input_delimiter">
+                  <option value="comma">comma ,</option><option value="tab">tab</option>
+                  <option value="pipe">pipe |</option><option value="semicolon">semicolon ;</option>
+                </select></div>
+              <div class="field"><label class="check"><input type="checkbox" name="input_has_header" checked> First row is a header <small>(skipped — names come from the declared fields below)</small></label></div>
+            </div>
+            <div data-fmt="input-xml" hidden>
+              <div class="field"><label>Record element <small>(the repeated element holding one record; blank = auto-detect the first element under the root)</small></label>
+                <input name="input_xml_record" class="mono" placeholder="record"></div>
+              <p class="hint">Each record's fields are the element's attributes plus its child elements' text, e.g. <span class="mono">&lt;cdr&gt;&lt;msisdn&gt;278…&lt;/msisdn&gt;&lt;seconds&gt;90&lt;/seconds&gt;&lt;/cdr&gt;</span>.</p>
+            </div>
+
+            <div class="field row" style="margin-top:6px"><label class="check">
+              <input type="checkbox" name="input_container" data-action="container-toggle">
+              Input files are <b>tar.gz archives</b> of many CDR files <small>(each member is decoded with the format above)</small></label></div>
+            <div id="container-opts" hidden>
+              <div class="field"><label>Member filter <small>(glob on the member file name)</small></label>
+                <input name="input_member_glob" class="mono" placeholder="*.csv"></div>
+              <p class="hint">Streaming — memory stays bounded no matter the archive size. One archive = one processed-file record; a bad member quarantines the whole archive with the member named in the reason.</p>
+            </div>
+            <div data-fmt="input-json" hidden>
+              <div class="field"><label>Shape</label>
+                <select name="input_json_mode"><option value="ndjson">NDJSON (one object per line)</option><option value="array">JSON array</option></select></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h2>Declared input fields</h2>
+              <button type="button" class="btn tiny" data-action="parse-fields">Parse from sample →</button>
+            </div>
+            <p class="hint">These fields <b>define the input structure</b> — for DSV they are the columns in order, for JSON the object keys — and each value is interpreted as the type you choose. They are also the dropdown choices when you map the output. Add them by hand, or click “Parse from sample” to read the DSV header row / JSON keys from the sample on the right.</p>
             <table class="tbl modeller">
-              <thead><tr><th>Output field</th><th>Source</th><th>From</th><th>Type</th><th></th></tr></thead>
-              <tbody id="field-rows">
-                {{/* one starter row */}}
-              </tbody>
+              <thead><tr><th>Field name</th><th>Type</th><th></th></tr></thead>
+              <tbody id="decl-rows"></tbody>
             </table>
-            <button type="button" class="btn small" data-action="add-field">+ Add field</button>
+            <button type="button" class="btn small" data-action="add-decl">+ Add field</button>
           </div>
-        </div>
 
-        <div class="card">
-          <div class="card-head"><h2>4 · Output format</h2></div>
-          <div class="seg" data-seg="output">
-            <label class="segbtn"><input type="radio" name="output_kind" value="dsv" data-action="kind" data-target="output"> DSV</label>
-            <label class="segbtn on"><input type="radio" name="output_kind" value="json" checked data-action="kind" data-target="output"> JSON</label>
-          </div>
-          <div data-fmt="output-dsv" hidden>
-            <div class="field"><label>Delimiter</label>
-              <select name="output_delimiter"><option value="comma">comma ,</option><option value="tab">tab</option><option value="pipe">pipe |</option><option value="semicolon">semicolon ;</option></select></div>
-          </div>
-          <div data-fmt="output-json">
-            <div class="field"><label>Shape</label>
-              <select name="output_json_mode"><option value="ndjson">NDJSON (one object per line)</option><option value="array">JSON array</option></select></div>
-          </div>
-        </div>
+          <div class="wiznav"><button type="button" class="btn ghost" data-action="prev-step">← Back</button><button type="button" class="btn primary" data-action="next-step">Next: Destinations →</button></div>
+        </section>
 
-        <div class="actions">
-          <button type="submit" class="btn primary lg">Create pipeline</button>
-        </div>
+        <!-- ===================== STEP 3 · DESTINATIONS ===================== -->
+        <section class="step" data-step="3" hidden>
+          <div class="card">
+            <div class="card-head"><h2>Destinations</h2>
+              <button type="button" class="btn small primary" data-action="add-dest">+ Add destination</button>
+            </div>
+            <p class="hint">Each destination defines <b>its own output</b> — which fields it carries, in what format, and where it lands. Billing can take three billable columns as pipe-delimited DSV while revenue assurance takes every field as gzipped NDJSON. The input is decoded <b>once</b> and shaped per destination. Destinations deliver <b>independently</b>: if one is down, the others still get their data and the failed one retries on its own.</p>
+
+            <table class="tbl dest-tbl">
+              <thead><tr><th>Name</th><th>Kind</th><th>Where</th><th>Format</th><th>Fields</th><th>Delivery</th><th></th></tr></thead>
+              <tbody id="dest-rows"></tbody>
+            </table>
+            <p class="hint muted" id="dest-empty">No destinations yet — add at least one.</p>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h2>Consolidation</h2>
+              <label class="check"><input type="checkbox" name="batch_enabled" data-action="batch-toggle"> Combine many input files into one output</label>
+            </div>
+            <p class="hint">Ten 100-record files become one 1000-record file. Records are preserved exactly; only the file boundary changes — this is what downstream billing systems expect instead of a spray of tiny files.</p>
+            <div id="batch-opts" hidden>
+              <div class="grid3">
+                <div class="field"><label>Max files per output</label>
+                  <input name="batch_max_files" type="number" min="1" max="1000" value="10"></div>
+                <div class="field"><label>Max accumulated input <small>(MB, 0 = none)</small></label>
+                  <input name="batch_max_mb" type="number" min="0" value="0"></div>
+                <div class="field"><label>Max wait <small>(seconds, 0 = none)</small></label>
+                  <input name="batch_max_age_seconds" type="number" min="0" value="60"></div>
+              </div>
+              <p class="hint"><b>Max wait</b> is how long a partial group is held back before it is written anyway. With no wait set, nothing is written until a full batch has arrived — so set it unless your input always arrives in complete groups.</p>
+              <p class="hint">These limits are <b>pipeline-wide</b>, not per destination: a batch is one frozen set of input files, and every destination receives that same set. That is what makes delivery exactly-once — if two destinations grouped files differently, the overlapping files would be delivered twice. <b>Compression</b> is per destination (it is a property of how that destination receives the object), and lives in each destination's Delivery section.</p>
+            </div>
+          </div>
+
+          <div class="wiznav"><button type="button" class="btn ghost" data-action="prev-step">← Back</button><button type="submit" class="btn primary lg">Create pipeline</button></div>
+        </section>
       </div>
 
       <!-- RIGHT: live preview -->
       <div class="col">
         <div class="card sticky">
-          <div class="card-head"><h2>Live preview</h2>
+          <div class="card-head"><h2>Live preview <small class="muted mono" id="preview-dest"></small></h2>
             <div class="preset">
               <button type="button" class="btn tiny" data-action="sample" data-kind="dsv">DSV sample</button>
               <button type="button" class="btn tiny" data-action="sample" data-kind="json">JSON sample</button>
+              <button type="button" class="btn tiny" data-action="sample" data-kind="xml">XML sample</button>
             </div>
           </div>
           <label class="lbl">Sample input</label>
@@ -98,27 +249,200 @@
     </div>
   </form>
 </main>
-{{template "foot" .}}
 
-<template id="field-row-tpl">
+<!-- ===================== DESTINATION EDITOR (modal) ===================== -->
+<div class="ds-modal" id="dest-modal" hidden>
+  <div class="ds-modal-backdrop" data-action="close-dest"></div>
+  <div class="ds-modal-box wide">
+    <div class="ds-modal-head">
+      <b id="dest-modal-title">Add destination</b>
+      <button type="button" class="ds-modal-x" data-action="close-dest">✕</button>
+    </div>
+    <div class="dest-modal-body">
+      <div class="grid2">
+        <div class="field"><label>Name</label>
+          <input id="dm-name" class="mono" placeholder="billing" autocomplete="off">
+          <small class="muted">Identifies this destination in delivery records and its output folder.</small>
+        </div>
+        <div class="field"><label>Kind</label>
+          <select id="dm-kind">
+            <option value="file">File — write an object</option>
+            <option value="rdbms">Database — insert into a table (not deliverable yet)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- ---------- FILE destination ---------- -->
+      <div data-dm-kind="file">
+        <div class="grid2">
+          <div class="field"><label>Datasource <small>(blank = same as pipeline)</small></label>
+            <select id="dm-datasource">
+              <option value="">— same as pipeline —</option>
+              {{range .Data.Datasources}}
+              <option value="{{.ID}}" data-kind="{{.Kind}}" data-conn="{{if eq .Kind "s3"}}{{.S3.Endpoint}}{{else}}{{.Root}}{{end}}">{{.Name}} ({{upper .Kind}})</option>
+              {{end}}
+            </select>
+            <small class="muted mono" id="dm-ds-conn"></small>
+          </div>
+          <div class="field"><label>Folder / prefix <small>(blank = auto)</small></label>
+            <input id="dm-dir" class="mono" placeholder="auto"></div>
+        </div>
+        <div class="field" id="dm-bucket-wrap" hidden>
+          <label>Bucket</label><input id="dm-bucket" class="mono" placeholder="billing-cdr">
+        </div>
+
+        <div class="field"><label>Format</label>
+          <div class="seg" id="dm-fmt-seg">
+            <label class="segbtn"><input type="radio" name="dm_format" value="dsv"> DSV</label>
+            <label class="segbtn on"><input type="radio" name="dm_format" value="json" checked> JSON</label>
+            <label class="segbtn"><input type="radio" name="dm_format" value="xml"> XML</label>
+          </div>
+        </div>
+        <div data-dm-fmt="dsv" hidden>
+          <div class="grid2">
+            <div class="field"><label>Delimiter</label>
+              <select id="dm-delimiter"><option value="comma">comma ,</option><option value="tab">tab</option><option value="pipe">pipe |</option><option value="semicolon">semicolon ;</option></select></div>
+            <div class="field"><label>Header row</label>
+              <select id="dm-has-header"><option value="1">yes</option><option value="0">no</option></select></div>
+          </div>
+        </div>
+        <div data-dm-fmt="json">
+          <div class="field"><label>Shape</label>
+            <select id="dm-json-mode"><option value="ndjson">NDJSON (one object per line)</option><option value="array">JSON array</option></select></div>
+        </div>
+        <div data-dm-fmt="xml" hidden>
+          <div class="grid2">
+            <div class="field"><label>Root element</label><input id="dm-xml-root" class="mono" placeholder="records"></div>
+            <div class="field"><label>Record element</label><input id="dm-xml-record" class="mono" placeholder="record"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ---------- RDBMS destination ---------- -->
+      <div data-dm-kind="rdbms" hidden>
+        <div class="grid2">
+          <div class="field"><label>Database datasource</label>
+            <select id="dm-db-datasource"><option value="">— choose —</option></select>
+            <small class="muted">No database datasources configured yet.</small>
+          </div>
+          <div class="field"><label>Table</label><input id="dm-table" class="mono" placeholder="cdr_fact"></div>
+        </div>
+        <div class="field"><label>Write mode</label>
+          <select id="dm-db-mode"><option value="insert">insert</option><option value="upsert">upsert</option></select></div>
+        <p class="hint warn">Database destinations can be configured but are <b>not delivered yet</b> — saving a pipeline with one is refused rather than silently dropping its records.</p>
+      </div>
+
+      <!-- ---------- OUTPUT FIELDS (this destination's own structure) ---------- -->
+      <div class="field">
+        <label>Output fields
+          <small>— what THIS destination receives, in this order. Others can carry different fields.</small>
+        </label>
+        <label class="check" style="margin:4px 0 8px">
+          <input type="checkbox" id="dm-passthrough" data-action="dm-passthrough"> Every input field, unchanged
+        </label>
+
+        <div id="dm-fields-wrap">
+          <table class="tbl modeller dm-fields-tbl">
+            <thead>
+              <tr><th style="width:26%">Output field</th><th style="width:20%">From</th><th>Source</th><th style="width:16%">Type</th><th style="width:74px"></th></tr>
+            </thead>
+            <tbody id="dm-fields"></tbody>
+          </table>
+          <p class="hint muted" id="dm-fields-empty">No fields yet — add the input fields you want, or a constant / concatenation.</p>
+          <div class="col-picker-actions">
+            <button type="button" class="btn small" data-action="dm-add-field">+ Add field</button>
+            <button type="button" class="btn tiny ghost" data-action="dm-add-all">Add all input fields</button>
+            <button type="button" class="btn tiny ghost" data-action="dm-clear-fields">Clear</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ---------- DELIVERY (file only) ---------- -->
+      <div class="field" data-dm-kind="file">
+        <label>Delivery</label>
+        <div class="grid2">
+          <div class="field"><label>Compression</label>
+            <select id="dm-compress">
+              <option value="0">none</option>
+              <option value="1">gzip (.gz)</option>
+            </select>
+            <small class="muted">How this destination receives the object. Consolidation (how many input files make one object) is set once for the whole pipeline.</small>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dest-modal-foot">
+      <button type="button" class="btn ghost" data-action="preview" title="preview this destination against the sample">▶ Preview</button>
+      <span style="flex:1"></span>
+      <button type="button" class="btn ghost" data-action="close-dest">Cancel</button>
+      <button type="button" class="btn primary" data-action="save-dest">Save destination</button>
+    </div>
+  </div>
+</div>
+
+<template id="dest-row-tpl">
+  <tr class="dest-row" data-dest-row>
+    <td><b data-c="name"></b></td>
+    <td><span class="tag" data-c="kind"></span></td>
+    <td class="mono muted" data-c="where"></td>
+    <td class="mono" data-c="format"></td>
+    <td class="mono muted" data-c="columns"></td>
+    <td data-c="delivery"></td>
+    <td class="right">
+      <button type="button" class="btn tiny" data-action="edit-dest">Edit</button>
+      <button type="button" class="btn tiny danger" data-action="del-dest">✕</button>
+    </td>
+  </tr>
+</template>
+
+
+
+
+
+<template id="dm-field-tpl">
   <tr class="frow">
-    <td><input name="field_output" class="mono" placeholder="a_number"></td>
-    <td><input name="field_source" class="mono" placeholder="msisdn"></td>
+    <td><input class="mono f-out" placeholder="msisdn" autocomplete="off"></td>
     <td>
-      <select name="field_kind" data-action="kind-change">
+      <select class="f-kind" data-action="dm-field-kind">
         <option value="field">input field</option>
         <option value="const">constant</option>
         <option value="concat">concat</option>
       </select>
     </td>
     <td>
-      <select name="field_type">
-        <option value="">keep type</option><option value="string">string</option>
+      <select class="f-source" data-action="dm-field-source"></select>
+      <input class="mono f-const" placeholder="a literal value" hidden autocomplete="off">
+      <input class="mono f-parts" placeholder="msisdn, '-', cell" hidden autocomplete="off">
+    </td>
+    <td>
+      <select class="f-type">
+        <option value="">(as-is)</option><option value="string">string</option>
         <option value="integer">integer</option><option value="number">number</option><option value="boolean">boolean</option>
       </select>
-      <input name="field_const" class="mono const-in" placeholder="constant / 'a','b'" hidden>
     </td>
-    <td><button type="button" class="btn tiny danger" data-action="remove-field">✕</button></td>
+    <td class="right nowrap">
+      <button type="button" class="btn tiny ghost" data-action="dm-field-up" title="move up">↑</button>
+      <button type="button" class="btn tiny ghost" data-action="dm-field-down" title="move down">↓</button>
+      <button type="button" class="btn tiny danger" data-action="dm-del-field" title="remove">✕</button>
+    </td>
   </tr>
 </template>
+
+{{template "foot" .}}
+
+<template id="decl-row-tpl">
+  <tr class="drow">
+    <td><input name="decl_name" class="mono" placeholder="msisdn"></td>
+    <td>
+      <select name="decl_type">
+        <option value="">(any)</option><option value="string">string</option>
+        <option value="integer">integer</option><option value="number">number</option><option value="boolean">boolean</option>
+      </select>
+    </td>
+    <td><button type="button" class="btn tiny danger" data-action="remove-decl">✕</button></td>
+  </tr>
+</template>
+
+
 </body></html>{{end}}

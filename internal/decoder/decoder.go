@@ -2,8 +2,8 @@
 // Format Definition (BR-DEC-001..011). Decoding is streaming / record-at-a-time
 // (BR-DEC-006) so memory is bounded by record size, not file size (BR-NFR-001).
 //
-// The alpha wires DSV and JSON. New decoders plug in behind the Decoder seam
-// (BR-NFR-032) without touching callers.
+// The alpha wires DSV, JSON and XML. New decoders plug in behind the Decoder
+// seam (BR-NFR-032) without touching callers.
 package decoder
 
 import (
@@ -31,12 +31,18 @@ func New(fs spec.FormatSpec) (Decoder, error) {
 		if fs.DSV == nil {
 			return nil, fmt.Errorf("decoder: dsv format selected but no dsv spec")
 		}
-		return newDSV(*fs.DSV)
+		return newDSV(*fs.DSV, fs.Fields)
 	case spec.FormatJSON:
 		if fs.JSON == nil {
 			return nil, fmt.Errorf("decoder: json format selected but no json spec")
 		}
-		return newJSON(*fs.JSON), nil
+		return newJSON(*fs.JSON, fs.Fields), nil
+	case spec.FormatXML:
+		s := spec.XMLSpec{}
+		if fs.XML != nil {
+			s = *fs.XML
+		}
+		return newXML(s, fs.Fields), nil
 	default:
 		return nil, fmt.Errorf("decoder: unsupported format kind %q", fs.Kind)
 	}

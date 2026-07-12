@@ -178,6 +178,87 @@ unrouted-record policy:
   to the pipeline; regexes compile; field names resolve against the pipeline's
   canonical schema (`BR-CFG-003`).
 
+### 7.1.5 Cross-backend delivery: split source and destination stores
+
+The file target's substrate is the pluggable `storage.Store` seam (§7.1.2). The
+alpha data plane makes that seam **two-sided**: a pipeline reads its input from one
+datasource and writes its output and done files to a **different** datasource — a
+different backend entirely — so a feed can *read S3 → write local POSIX*, or the
+reverse, with no output bytes ever routed through PostgreSQL (`BR-NFR-009`). This is
+the general form of the "file destination backend per destination" requirement
+(`BR-STO-002`): source and destination are resolved independently, not forced to the
+same backend.
+
+A **datasource** is a reusable, named storage connection — a POSIX working directory
+(`Root`), or an S3 endpoint + region + credentials with the bucket chosen
+per-pipeline. A pipeline references an **input datasource** and, optionally, a
+**distinct output datasource**; `Pipeline.CrossBackend()` reports whether an output
+destination is configured (`Pipeline.OutputDest`). When none is, the pipeline is
+same-backend and the two stores below collapse to one.
+
+The data plane splits its file access into two `storage.Store` instances:
+
+| Store | Lifecycle areas it owns | Resolved from |
+|-------|-------------------------|---------------|
+| **source store** | input, in-progress, quarantine | the input datasource (`Source`, cache key `SourceKey`) |
+| **destination store** | output, done, completion marker | the output datasource (`OutputDest`, cache key `DestKey`); the source store when same-backend |
+
+```plantuml
+@startuml cross-backend
+!theme plain
+skinparam defaultTextAlignment center
+storage "input\nin-progress\nquarantine" as SIN
+rectangle "source store\n(input datasource, e.g. S3)" as SRC #E8F0FE
+rectangle "runner.ProcessFile(src, dst, …)" as PF #FFF3CD
+rectangle "destination store\n(output datasource, e.g. POSIX)" as DST #E6F4EA
+storage "output\ndone\n<name>.marker" as SOUT
+SIN --> SRC
+SRC --> PF : Open input,\ndispose source
+PF --> DST : write output,\ncompletion marker,\ndone move
+DST --> SOUT
+PF ..> DST : storage.Relocate(dst, src)\n(source → done, cross-backend)
+@enduml
+```
+
+`runner.ProcessFile` takes the `src` and `dst` stores **explicitly**: it opens the
+input object and disposes of the source on `src`; it writes the output object, the
+completion marker, and the source→done relocation on `dst`. For a same-backend
+pipeline `dst == src` and every step is a single-store operation.
+
+**The `storage.Relocate` primitive.** `Store.Move` is same-store only — a POSIX
+`rename` or an S3 server-side copy+delete — and cannot span two backends. Every
+cross-backend lifecycle move (the source→done relocation on the happy path, and the
+re-arrival re-move) therefore goes through `storage.Relocate(dst, dstKey, src, srcKey)`:
+
+- **Same store** (`src == dst`): delegates to the backend-native `Move` (the §7.3.5
+  byte-placement primitive — `rename(2)` on POSIX, server-side copy+delete on S3).
+- **Different stores**: streams the object across (`dst.Put` fed by `src.Open`) and
+  deletes the source **only after** the destination write succeeds — a failed
+  transfer never loses the original. A source left lingering after the record already
+  committed is caught as a re-arrival on the next scan (`AlreadyProcessed`,
+  `BR-COL-006`) and re-moved, never reprocessed.
+
+Quarantine, being about the **input** file, always stays on the source store and so
+always uses a same-store `Move`.
+
+**Completion markers follow the output.** The DB↔storage reconciliation marker
+(`BR-COL-009`, `BR-NFR-017`) is written beside the done files on the **destination**
+store, so reconciliation of a cross-backend pipeline reads its markers from the store
+it wrote them to — not from the source it read from.
+
+**Store cache identity.** Resolved stores are cached (an S3 client is built once, not
+per scan). The cache key for an S3 datasource is
+`endpoint|bucket|region|accessKey|useSSL` — it deliberately includes the access key
+and TLS flag, not just endpoint/bucket/region, so two datasources on the same bucket
+that authenticate differently resolve to **separate** `Store` instances rather than
+silently sharing the first one's credentials. Conversely, a source and a destination
+that resolve to the *same* key share one `Store` instance — which is exactly what
+lets `Relocate` take the native-`Move` fast path instead of a cross-store stream.
+Filesystem-backed pipelines pre-create their lifecycle tree at creation
+(`storage.EnsureTree`): input/in-progress/quarantine on the source store, done/output
+on the destination store; object-storage backends have virtual prefixes and are
+skipped.
+
 ## 7.2 Delivery state model: `DL_DELIVERY`, `DC_DELIVERY_CONTRIBUTION`, `DSQ_DESTINATION_SEQUENCE`
 
 ### 7.2.1 `DL_DELIVERY` — one row per output × destination
@@ -291,14 +372,53 @@ type Encoder interface {
 | Encoder | Priority | Notes |
 |---------|:--------:|-------|
 | JSON (NDJSON / array document) | Must | Mirror of `BR-DEC-002` structures |
-| DSV | Must | Delimiter/quote/escape/header per definition (`BR-DEC-003` mirror) |
+| DSV | Must | Delimiter/quote/escape/header per definition (`BR-DEC-003` mirror); hand-serialized, byte-compatible with `encoding/csv` (alpha note below) |
 | Fixed-position | Must | Offset/length/pad/align per field (`BR-DEC-004` mirror) |
-| XML | Must | Element/attribute mapping, record-per-element (`BR-DEC-011` mirror) |
+| XML | Must | Element/attribute mapping, record-per-element (`BR-DEC-011` mirror); flat-record subset wired in the alpha (note below) |
 | ASN.1 (BER/DER) | Should | Schema-driven encode over the same declarative ASN.1 module the decoder uses; definite-length DER for output |
 | Canonical batch | internal | The RDBMS target's spool format (§7.4.1) — length-prefixed canonical records, not a consumer-facing format |
 
 Encoders are streaming and allocation-disciplined like decoders (`BR-NFR-003`): pooled
 buffers, one record in flight, no whole-file materialisation.
+
+**Alpha wiring note (XML and DSV output).** Two of the Must encoders are already
+wired in the alpha data plane, both hand-serialized in the same
+allocation-disciplined style (reused per-record buffer, one configurable write
+buffer, no per-record allocation):
+
+- **XML** (`spec.FormatXML`, configured via `XMLSpec{recordElement, rootElement}`)
+  ships the flat-record subset: a root element (default `records`) wraps one
+  record element (default `record`) per record, with one child element per output
+  column — per-column open/close tags precomputed once at `Begin`. Text escaping
+  is byte-identical to `encoding/xml.EscapeText` (the five predefined entities,
+  `\t`/`\n`/`\r` as numeric references, and U+FFFD substituted for runes that are
+  not valid XML 1.0 characters — verified differentially against the stdlib), so
+  output is always well-formed. Root/record/column names are sanitized into valid
+  XML element names (invalid name runes become `_`): a config problem yields an
+  ugly-but-well-formed element, never a permanently failing pipeline. A
+  null/missing value **omits** the column element. XML outputs carry the `.xml`
+  extension and `application/xml` content type.
+- **DSV** output no longer goes through `encoding/csv`: it is hand-serialized and
+  **byte-compatible** with the previous `csv.Writer` output (`UseCRLF=false`),
+  including its exact quoting rules — cell contains the delimiter, a quote, CR or
+  LF, begins with a space rune, or is the literal `\.` — verified differentially
+  against the stdlib.
+
+**As built (alpha) — compressed delivery, and the output phasing.** The file
+target supports **single-stream gzip output** (`compress: "gzip"` on the output
+Format Definition → `<name>.gz`, `application/gzip`): the encoder streams through a
+gzip writer into the atomic `Put`, so compression adds no buffering, no spool and
+no size-known-up-front requirement. This matches industry practice: mediation
+engines routinely deliver **individually gzip-compressed, sequence-named flat
+files**, while archive *containers* (zip/tar of many outputs) are avoided on the
+delivery leg because they defeat per-file audit, gap detection and single-file
+redelivery — containers belong to the archival/retention leg (§4.5, already
+tar.gz). Output phasing, in priority order: **phase 2 = roll-over (§7.3.2) +
+integrity/semaphore sidecars** (the conventions downstream batch loaders actually
+consume); **phase 3 = zip input** (§4.4.8); **container output** (tar.gz/zip of
+many members, requiring per-member spool for tar's size-first headers — zip
+streams natively via data descriptors) is parked as an on-demand, partner-specific
+feature.
 
 ### 7.3.2 Batching & roll-over (`BR-DST-005`)
 
@@ -931,7 +1051,7 @@ delivered-count rollups `BR-REC-002/009`). Full DDL in [[03-database-design]] §
 | BR-DST-019 (TLS default to load target) | §7.4.1 |
 | BR-DST-020 (header/trailer control records, count check before rename) | §7.3.4 |
 | BR-DST-021 (delivered-output lifecycle, retention vs re-send horizon) | §7.7 |
-| BR-STO-002 (file-destination backend: local POSIX / SFTP / S3, per destination) | §7.1.2, §7.5.1 |
+| BR-STO-002 (file-destination backend: local POSIX / SFTP / S3, per destination) | §7.1.2, §7.1.5 (cross-backend source vs destination), §7.5.1 |
 | BR-STO-004 (atomic output on every backend; native `PutObject`/multipart on S3) | §7.3.5 |
 | BR-STO-007 (bounded, monitored object-store spool prefix) | §7.5.1, §7.5.3 |
 

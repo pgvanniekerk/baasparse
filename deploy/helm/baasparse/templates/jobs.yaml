@@ -1,4 +1,6 @@
-{{/* Pre-install/upgrade: apply the database schema (expand phase, BR-HA-011). */}}
+{{- if .Values.jobs.migrate.enabled }}
+{{/* Pre-install/upgrade: apply the database schema (expand phase, BR-HA-011).
+     Off by default — schema migrations are a deliberate devops step at deploy time. */}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -32,8 +34,11 @@ spec:
           securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           volumeMounts: [{ name: tmp, mountPath: /tmp }]
       volumes: [{ name: tmp, emptyDir: {} }]
+{{- end }}
+{{- if .Values.jobs.createAdmin.enabled }}
 ---
-{{/* Post-install/upgrade: create/reset the bootstrap administrator (BR-USR-009). */}}
+{{/* Post-install/upgrade: create/reset the bootstrap administrator (BR-USR-009).
+     Off by default — admin bootstrap is a deliberate devops step at deploy time. */}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -80,3 +85,4 @@ spec:
           securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           volumeMounts: [{ name: tmp, mountPath: /tmp }]
       volumes: [{ name: tmp, emptyDir: {} }]
+{{- end }}

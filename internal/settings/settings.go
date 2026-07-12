@@ -35,6 +35,27 @@ type Settings struct {
 	Storage     StorageSettings `yaml:"storage"`
 	Log         LogSettings     `yaml:"log"`
 	Otel        OtelSettings    `yaml:"otel"`
+	Perf        PerfSettings    `yaml:"perf"`
+}
+
+// PerfSettings tunes the streaming hot path. Buffer sizes trade memory for fewer
+// syscalls / network round-trips — most impactful when streaming from/to S3
+// (BR-NFR-001/002: memory is a function of concurrency × buffer size, never input
+// size). 0 = engine default.
+type PerfSettings struct {
+	ReadBufferBytes  int `yaml:"read_buffer_bytes"`
+	WriteBufferBytes int `yaml:"write_buffer_bytes"`
+	// MaxConcurrentFiles bounds how many files ONE instance processes at a time
+	// (the watcher worker pool). Memory scales as workers × buffer sizes; CPU
+	// benefit caps at the pod's CPU limit. 0 = engine default (4).
+	MaxConcurrentFiles int `yaml:"max_concurrent_files"`
+	// Archive-container decompression-bomb guards (TS 04 §4.4.8): a tar.gz input
+	// that exceeds any bound is quarantined with ARCHIVE_LIMIT_EXCEEDED. These are
+	// safety rails, not sizing policy — defaults sit far above legitimate traffic
+	// (100k members / 32 GiB member / 256 GiB total). 0 = engine default.
+	ArchiveMaxMembers     int64 `yaml:"archive_max_members"`
+	ArchiveMaxMemberBytes int64 `yaml:"archive_max_member_bytes"`
+	ArchiveMaxTotalBytes  int64 `yaml:"archive_max_total_bytes"`
 }
 
 // StorageSettings selects the data-plane storage backend (TS 16 §16.2).
@@ -211,6 +232,25 @@ func applyEnv(s *Settings) error {
 	setStr(&s.Otel.Endpoint, "OTEL_EXPORTER_OTLP_ENDPOINT")
 	setStr(&s.Otel.Endpoint, "BAASPARSE_OTEL_ENDPOINT")
 	setBool(&s.Otel.Insecure, "BAASPARSE_OTEL_INSECURE")
+
+	if err := setInt(&s.Perf.ReadBufferBytes, "BAASPARSE_READ_BUFFER_BYTES"); err != nil {
+		return err
+	}
+	if err := setInt(&s.Perf.WriteBufferBytes, "BAASPARSE_WRITE_BUFFER_BYTES"); err != nil {
+		return err
+	}
+	if err := setInt(&s.Perf.MaxConcurrentFiles, "BAASPARSE_MAX_CONCURRENT_FILES"); err != nil {
+		return err
+	}
+	if err := setInt64(&s.Perf.ArchiveMaxMembers, "BAASPARSE_ARCHIVE_MAX_MEMBERS"); err != nil {
+		return err
+	}
+	if err := setInt64(&s.Perf.ArchiveMaxMemberBytes, "BAASPARSE_ARCHIVE_MAX_MEMBER_BYTES"); err != nil {
+		return err
+	}
+	if err := setInt64(&s.Perf.ArchiveMaxTotalBytes, "BAASPARSE_ARCHIVE_MAX_TOTAL_BYTES"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -224,6 +264,32 @@ func setBool(dst *bool, env string) {
 	if v := os.Getenv(env); v != "" {
 		*dst = v == "1" || v == "true" || v == "yes"
 	}
+}
+
+func setInt(dst *int, env string) error {
+	v := os.Getenv(env)
+	if v == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fmt.Errorf("%s must be a number: %q", env, v)
+	}
+	*dst = n
+	return nil
+}
+
+func setInt64(dst *int64, env string) error {
+	v := os.Getenv(env)
+	if v == "" {
+		return nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return fmt.Errorf("%s must be a number: %q", env, v)
+	}
+	*dst = n
+	return nil
 }
 
 // Save writes the config file (restricted perms — it can hold credentials).

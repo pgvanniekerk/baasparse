@@ -1,0 +1,42 @@
+# LOCAL DEV ONLY — expose a PostgreSQL running on the host to microk8s.
+#
+# Gives the cluster a stable Service name (baasparse-db:5432) for the host's
+# Postgres via a selector-less Service + manual Endpoints pointing at the node IP.
+# The app then connects with an ordinary DSN, exactly as it would to a managed
+# database at a client site — so nothing app-side is "local-only".
+#
+#   DATABASE_URL=postgres://postgres:admin@baasparse-db:5432/baasparseDB?sslmode=disable
+#
+# Host prerequisite (Postgres must accept the cluster) — one time, needs sudo:
+#   echo "listen_addresses = '*'" | sudo tee /etc/postgresql/18/main/conf.d/10-baasparse.conf
+#   # append to /etc/postgresql/18/main/pg_hba.conf:
+#   #   host  all  postgres  10.1.0.0/16       scram-sha-256   # microk8s pod CIDR
+#   #   host  all  postgres  192.168.0.134/32  scram-sha-256   # node IP (fallback)
+#   sudo systemctl restart postgresql
+#
+# Apply:  microk8s kubectl apply -f deploy/local/postgres-endpoint.yaml
+#
+# NOTE: the Endpoints IP is the node's address. If this host is on DHCP and its IP
+# changes, update subsets[].addresses[].ip below and re-apply (and the pg_hba /32).
+apiVersion: v1
+kind: Namespace
+metadata: { name: baasparse }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: baasparse-db
+  namespace: baasparse
+  labels: { app.kubernetes.io/name: baasparse-db, app.kubernetes.io/component: external-db }
+spec:
+  ports:
+    - { name: postgres, port: 5432, targetPort: 5432, protocol: TCP }
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: baasparse-db
+  namespace: baasparse
+subsets:
+  - addresses: [{ ip: 192.168.0.134 }]   # <-- node IP; update if it changes
+    ports: [{ name: postgres, port: 5432, protocol: TCP }]

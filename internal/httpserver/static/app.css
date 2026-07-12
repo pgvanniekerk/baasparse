@@ -4,6 +4,13 @@
   --tag:#efeff0; --shadow:0 1px 2px rgba(0,0,0,.05),0 8px 24px rgba(0,0,0,.05);
   --radius:14px;
 }
+/* The [hidden] attribute must win over author display rules — the wizard steps,
+   the output field-kind source cell (select vs const vs concat), and the
+   format/backend panels all show/hide via `hidden`, and rules like
+   `.step{display:flex}` would otherwise defeat it (leaving every step visible). */
+[hidden]{display:none!important}
+/* Inline wizard validation message shown above the Back/Next row of a step. */
+.wiz-err{color:var(--warn);background:var(--warnbg);border:1px solid #f3b98d;border-radius:9px;padding:9px 13px;font-size:13px;font-weight:600}
 @media (prefers-color-scheme:dark){
   :root{--bg:#0d0d0d;--panel:#181818;--ink:#f4f4f5;--muted:#a1a1aa;--line:#2a2a2a;
     --brand:#fb923c;--brand2:#f97316;--ok:#fdba74;--okbg:#3a1e0a;--warn:#fdba74;--warnbg:#3a1e0a;
@@ -67,6 +74,29 @@ a{color:var(--brand);text-decoration:none}
 .pill{display:inline-block;padding:2px 9px;border-radius:999px;background:var(--tag);font-size:12px;font-weight:600;color:var(--muted)}
 .pill.ok{background:var(--okbg);color:var(--ok)}
 .pill.warn{background:var(--warnbg);color:var(--warn)}
+.pill.err{background:#fdecec;color:#c02626}
+
+/* datasource picker (pipeline wizard) */
+.ds-select-row{display:flex;gap:8px;align-items:center}
+.ds-select-btn{flex:1;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 12px;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--ink);font:inherit;font-weight:600;cursor:pointer;text-align:left}
+.ds-select-btn:hover{border-color:var(--brand)}
+.ds-caret{color:var(--muted);flex:none}
+.ds-selected{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ds-detail{margin:-2px 0 12px;padding-left:2px}
+.ds-conn{font-size:12px;margin-bottom:8px}
+.ds-modal[hidden]{display:none}
+.ds-modal{position:fixed;inset:0;z-index:60;display:flex;align-items:flex-start;justify-content:center}
+.ds-modal-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.45)}
+.ds-modal-box{position:relative;margin-top:10vh;width:min(540px,92vw);max-height:72vh;display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
+.ds-modal-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line);font-size:15px}
+.ds-modal-x{width:auto;background:none;border:0;font-size:16px;color:var(--muted);cursor:pointer;padding:0}
+.ds-modal-search{display:block;box-sizing:border-box;width:calc(100% - 32px);margin:12px 16px 8px}
+.ds-modal-list{list-style:none;margin:0;padding:0 8px 12px;overflow-y:auto}
+.ds-opt{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:9px;cursor:pointer}
+.ds-opt:hover{background:var(--tag)}
+.ds-opt[hidden]{display:none}
+.ds-opt-name{font-weight:700}
+.ds-opt-conn{margin-left:auto;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:48%}
 .tag{display:inline-block;padding:2px 8px;border-radius:7px;background:var(--tag);font-size:12px;font-weight:700;letter-spacing:.03em}
 .empty{padding:22px;text-align:center;color:var(--muted)}
 .empty-lg{text-align:center;padding:48px}
@@ -119,6 +149,17 @@ textarea{resize:vertical}
 .susp{margin-top:10px;font-size:13px}
 .susp li{margin:3px 0}
 .preset{display:flex;gap:6px}
+
+/* wizard */
+.stepper{display:flex;gap:8px;list-style:none;padding:0;margin:0 0 4px;flex-wrap:wrap}
+.stepper li{display:flex;align-items:center;gap:7px;padding:8px 13px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--muted);font-weight:600;font-size:13px;cursor:pointer;flex:1;min-width:120px}
+.stepper li b{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:var(--tag);color:var(--muted);font-size:12px}
+.stepper li.on{color:var(--ink);border-color:var(--brand)}
+.stepper li.on b{background:linear-gradient(135deg,var(--brand),var(--brand2));color:#fff}
+.stepper li.done b{background:var(--ok);color:#fff}
+.step{display:flex;flex-direction:column;gap:16px}
+.wiznav{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:4px}
+.concat-in{display:flex;flex-direction:column;gap:6px}
 
 /* detail */
 .kv{display:grid;grid-template-columns:120px 1fr;gap:6px 12px;margin:0 0 12px}
@@ -191,3 +232,29 @@ textarea{resize:vertical}
 
 @media (max-width:1080px){.builder-grid{grid-template-columns:1fr}.cards{grid-template-columns:1fr 1fr}.grid2{grid-template-columns:1fr}.guarantees{grid-template-columns:1fr}}
 @media (max-width:720px){.app{grid-template-columns:1fr}.sidebar{position:static;height:auto;flex-direction:row;flex-wrap:wrap}.foot{grid-column:1}}
+
+/* ---- destinations: table + editor modal (wizard step 4) ---- */
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+@media (max-width:720px){.grid3{grid-template-columns:1fr}}
+
+.dest-tbl td{vertical-align:middle}
+.dest-tbl td.right{text-align:right;white-space:nowrap}
+.dest-row .tag{font-size:11px}
+
+.ds-modal-box.wide{max-width:680px;width:calc(100vw - 48px)}
+.dest-modal-body{padding:4px 16px 8px;max-height:min(70vh,620px);overflow-y:auto}
+.dest-modal-foot{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--line)}
+
+.col-picker-actions{display:flex;align-items:center;gap:8px;margin-top:8px}
+
+/* the destination's own output-field table */
+.dm-fields-tbl{margin-top:4px}
+.dm-fields-tbl th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted,#8b949e)}
+.dm-fields-tbl td{padding:4px 6px;vertical-align:middle}
+.dm-fields-tbl td.right{text-align:right}
+.dm-fields-tbl .nowrap{white-space:nowrap}
+.dm-fields-tbl input,.dm-fields-tbl select{width:100%;padding:5px 7px;border:1px solid var(--line);border-radius:6px;background:transparent;color:inherit;font-size:13px}
+.dm-fields-tbl .btn.tiny{padding:2px 6px}
+
+input.invalid{border-color:#e5484d !important;box-shadow:0 0 0 2px rgba(229,72,77,.2)}
+.hint.warn{color:#d9822b}

@@ -14,14 +14,40 @@ type FormatKind string
 const (
 	FormatDSV  FormatKind = "dsv"
 	FormatJSON FormatKind = "json"
+	FormatXML  FormatKind = "xml"
 )
 
 // FormatSpec describes a file structure (a Format Definition, FD_SPEC). Exactly
-// one of DSV/JSON is set, selected by Kind.
+// one of DSV/JSON/XML is set, selected by Kind.
 type FormatSpec struct {
-	Kind FormatKind `json:"kind"`
-	DSV  *DSVSpec   `json:"dsv,omitempty"`
-	JSON *JSONSpec  `json:"json,omitempty"`
+	Kind   FormatKind  `json:"kind"`
+	DSV    *DSVSpec    `json:"dsv,omitempty"`
+	JSON   *JSONSpec   `json:"json,omitempty"`
+	XML    *XMLSpec    `json:"xml,omitempty"`
+	Fields []FieldSpec `json:"fields,omitempty"` // declared input fields — the single input-structure model for DSV (positional columns), JSON (keys) and XML (child elements/attributes)
+
+	// Container (INPUT side only): "" = plain file, "targz" = the input object is
+	// a tar.gz archive whose member files are each decoded with this format
+	// (TS 04 §4.4.8). MemberGlob filters members by base name (default "*").
+	Container  string `json:"container,omitempty"`
+	MemberGlob string `json:"memberGlob,omitempty"`
+	// Compress (OUTPUT side only): "" = plain, "gzip" = stream the encoded output
+	// through gzip into a "<name>.gz" object (TS 07 §7.3 as-built note).
+	Compress string `json:"compress,omitempty"`
+	// Columns (OUTPUT side only) projects the transformed record down to these
+	// fields, in this order. It is what lets one pipeline feed destinations that
+	// want different shapes of the same records — billing takes a narrow set of
+	// columns, revenue assurance takes everything — without decoding twice. Empty
+	// means "every column the transform produced".
+	Columns []string `json:"columns,omitempty"`
+}
+
+// FieldSpec declares one input field: its name and the type its raw value should
+// be interpreted as. Types are applied best-effort at decode (DSV cells become
+// typed like JSON values), so there is one declaration model for every format.
+type FieldSpec struct {
+	Name string    `json:"name"`
+	Type ValueType `json:"type,omitempty"`
 }
 
 // DSVSpec configures a delimiter-separated format (CSV/TSV/pipe/...), per
@@ -36,6 +62,21 @@ type DSVSpec struct {
 // JSONSpec configures a JSON format, per BR-DEC-002 (input) and BR-DST-002 (output).
 type JSONSpec struct {
 	Mode string `json:"mode"` // "ndjson" (record-per-line) or "array"
+}
+
+// XMLSpec configures an XML format, per BR-DEC-002 (input) and BR-DST-002
+// (output). The alpha models FLAT records: on decode, each occurrence of the
+// record element yields one record whose fields are the element's attributes
+// plus its child elements' (whitespace-trimmed) text content; on encode, each
+// record becomes one record element with a child element per column.
+type XMLSpec struct {
+	// RecordElement is the repeated element holding one record. Decode: empty
+	// auto-detects the first element under the document root. Encode: the
+	// element written per record (default "record").
+	RecordElement string `json:"recordElement,omitempty"`
+	// RootElement is the document root the encoder wraps records in
+	// (default "records"). Ignored on decode.
+	RootElement string `json:"rootElement,omitempty"`
 }
 
 // FieldKind selects how an output field's value is produced.

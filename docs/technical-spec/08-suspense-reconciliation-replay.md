@@ -43,9 +43,10 @@ returns `(ok []Record, suspended []Suspense)` per batch and the pass continues.
 Suspense rows are inserted in the **same checkpoint transaction** as the batch's other
 effects (§8.5.2) — durable before the file can complete, adding no extra round-trip,
 and never re-inserted on crash-replay because they travel with the checkpoint offset.
-A poison record that fails *gracefully* lands here; abnormal termination is the
-separate attempt-count/quarantine mechanism (`BR-COL-017`,
-[[04-acquisition-collection-archiving]]) — the two are never conflated.
+A poison record that fails *gracefully* lands here; a **whole-file** failure — by
+content-decode error or by repeated no-progress takeover — is the separate quarantine
+mechanism (`BR-COL-017`, §8.1.4, [[04-acquisition-collection-archiving]]) — the two are
+never conflated.
 
 ### 8.1.3 Status lifecycle and query surface (`BR-ERR-003`)
 
@@ -69,6 +70,49 @@ the partial index; every row drills down to its file, locator, context, attempt
 history, and audit trail (`AE_AUDIT_EVENT` rows correlated by file UID +
 `SU_UID`). Rising-suspense and suspense-age alerts feed from the same counts
 (`BR-OPS-004`, [[12-observability-operations]]).
+
+### 8.1.4 Whole-file quarantine: content failure vs retryable infrastructure (`BR-COL-017`)
+
+Suspense (§8.1.1–§8.1.3) is per-record and *graceful*; **quarantine** is the whole-file
+counterpart, reached by **two distinct triggers**, each carrying a reason:
+
+- **Content failure — quarantine immediately.** A whole-file decode/content failure (a
+  malformed input that will never parse, an unusable format) is classified as a content
+  error and quarantines the file **on the first attempt**, rather than looping a lease
+  over bytes that can never succeed. On object storage there is no filesystem for an
+  operator to inspect, so the *recorded reason* is how such a failure becomes visible at
+  all.
+- **Poison stall — quarantine after repeated no-progress takeovers.** A file taken over
+  `maxStall` times without advancing its checkpoint is treated as poison and quarantined
+  with a `STALLED` reason — the original attempt-count heuristic (`FC_STALL_COUNT`,
+  [[04-acquisition-collection-archiving]]), unchanged.
+
+**Classification — what is *not* quarantined.** Quarantine must never swallow a valid
+input that merely hit an infrastructure fault, so the worker classifies the pipeline
+run's error *before* deciding. Because output is produced by streaming
+decode→transform→encode into a destination `Put` through an `io.Pipe`, a write-side
+outage cannot masquerade as a bad input — it arrives wrapped as an `EncodeError`:
+
+| Failure | Signal | Disposition |
+|---------|--------|-------------|
+| **Decode/content failure** | anything other than the two below — surfaced as a `DECODE_ERROR` reason | **Quarantine now**, with the reason |
+| **Destination write outage** | `pipeline.EncodeError` — the encoder's write into the output pipe fails when the (possibly cross-backend, §8.3.1) destination `Put` dies mid-stream | **Retryable infra** — return; let the lease expire and re-run |
+| **Shutdown / timeout** | `context.Canceled` / `context.DeadlineExceeded` (the `MaxProcessing` bound or the drain deadline) | **Retryable infra** — same |
+
+Only a genuine decode failure quarantines; a destination outage or a shutdown is
+retried lease-paced, never quarantined — so a transient S3/FS write fault on the output
+side can never strand a good input in the quarantine area.
+
+**Reason persistence.** The quarantine reason is split into a leading `UPPER_SNAKE` code
+plus the full detail text ([[02-conventions]] §2.3.1) and persisted in the columns
+**`PF_REASON_CODE`** and **`PF_ERROR_TEXT`** on `PF_PROCESSED_FILE` — so the file's
+`QUARANTINED` row explains *why*. The reason is surfaced on the processed-files view
+(status-aware pill + reason) and as the metric label
+`baasparse_files_quarantined_total{pipeline, reason_code}`
+([[12-observability-operations]]); the high-cardinality detail stays in the row and
+logs. The record is written **fence-guarded and atomic** with the claim release (a lost
+claim makes it a no-op), the source is moved into the quarantine area on the **source**
+store, and the file reconciles as `INDETERMINATE` (§8.5.3, §8.5.7).
 
 ## 8.2 Reprocessing as-is (`BR-ERR-004`)
 
@@ -213,6 +257,15 @@ reprocessing; `BR-STO-001`, [[16-cloud-native-deployment]] §16.3). Startup
 reference still resolves on its backend — by **directory scan** (POSIX/SFTP) or
 **object `List` + done-marker objects** (S3), over the same `Ref` — so a pin can
 never silently outlive its bytes.
+
+**Cross-backend markers resolve on the destination.** When a pipeline reads input from
+one datasource and writes output/done to a *different* one (e.g. read S3 → write local
+FS), the completion markers are written beside the `DONE` files on the
+**destination** store — a different backend from the source. Startup reconciliation
+therefore lists and reads them from the **destination** backend for such pipelines (and
+from the source backend otherwise): a missing `PF` row is recovered from wherever the
+runner wrote its marker, so a cross-backend recovery/pin check never looks on the wrong
+backend (`BR-NFR-017`).
 
 ### 8.3.2 Pinned-bytes visibility
 
@@ -484,7 +537,9 @@ baseline buckets themselves (`RS_SUSPENDED → RS_ROUTED/RS_DISCARDED/RS_AGGREGA
 §8.5.2): adjustment output is visible, and input volume never inflates either way. Diverted outputs reconcile as *diverted, not delivered* (from
 `DL_DELIVERY` `DIVERTED` rows via `DC`, `BR-DST-017`). Quarantined files keep PF status
 `QUARANTINED` + baseline `INDETERMINATE` — shown as **unprocessed/quarantined**,
-neither lost nor done.
+neither lost nor done; the quarantine reason is carried on the row
+(`PF_REASON_CODE` + `PF_ERROR_TEXT`) and surfaced to operators (§8.1.4), so the
+file-level state records not just *that* it was quarantined but *why*.
 
 ### 8.5.8 RDBMS delivered-on-commit (`BR-REC-009`)
 
@@ -563,6 +618,6 @@ Full DDL in [[03-database-design]] §3.5.24.
 
 Related requirements satisfied here and cross-referenced: `BR-CFG-014` (§8.2.1),
 `BR-COR-012` (§8.2.3, §8.4.3), `BR-DST-012/017/018` (§8.2.2, §8.4, §8.5.7),
-`BR-COL-017` (§8.1.2, §8.5.3), `BR-VAL-006` (§8.5.4), record states BRS §5.2 (§8.6);
+`BR-COL-017` (§8.1.2, §8.1.4, §8.5.3), `BR-VAL-006` (§8.5.4), record states BRS §5.2 (§8.6);
 `BR-STO-001/003/006` (storage `Ref` for suspense/replay, backend retention, startup
 DB↔storage reconciliation — §8.2.1, §8.3.1, §8.4.1).

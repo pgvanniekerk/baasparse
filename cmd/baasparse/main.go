@@ -28,8 +28,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pgvanniekerk/baasparse/internal/archiver"
 	"github.com/pgvanniekerk/baasparse/internal/config"
+	"github.com/pgvanniekerk/baasparse/internal/container"
+	"github.com/pgvanniekerk/baasparse/internal/encoder"
+	"github.com/pgvanniekerk/baasparse/internal/fetcher"
 	"github.com/pgvanniekerk/baasparse/internal/httpserver"
+	"github.com/pgvanniekerk/baasparse/internal/pipeline"
 	"github.com/pgvanniekerk/baasparse/internal/reconcile"
 	"github.com/pgvanniekerk/baasparse/internal/runner"
 	"github.com/pgvanniekerk/baasparse/internal/settings"
@@ -169,6 +174,24 @@ func run(s settings.Settings, log *slog.Logger, console func(string, ...any)) er
 		listen = fmt.Sprintf(":%d", s.Port)
 	}
 
+	// Apply hot-path buffer tuning (engine-wide; env-configurable for S3/network).
+	if s.Perf.ReadBufferBytes > 0 {
+		pipeline.ReadBufferBytes = s.Perf.ReadBufferBytes
+	}
+	if s.Perf.WriteBufferBytes > 0 {
+		encoder.WriteBufferBytes = s.Perf.WriteBufferBytes
+	}
+	// Archive-container safety limits (decompression-bomb guards, TS 04 §4.4.8).
+	if s.Perf.ArchiveMaxMembers > 0 {
+		container.MaxMembers = s.Perf.ArchiveMaxMembers
+	}
+	if s.Perf.ArchiveMaxMemberBytes > 0 {
+		container.MaxMemberBytes = s.Perf.ArchiveMaxMemberBytes
+	}
+	if s.Perf.ArchiveMaxTotalBytes > 0 {
+		container.MaxTotalBytes = s.Perf.ArchiveMaxTotalBytes
+	}
+
 	console("baasparse %s — starting\n", version)
 	log.Info("starting", "component", "startup", "function", "run", "version", version, "listen", listen, "storage", s.Storage.Backend)
 
@@ -257,12 +280,37 @@ func run(s settings.Settings, log *slog.Logger, console func(string, ...any)) er
 		procCancel() // hard-cancel any file still processing past the grace
 	}()
 
+	// The data-plane background loops (watcher, SFTP fetcher, archiver) all share
+	// the same lifecycle: they scan on ctx (SIGTERM stops claiming new work
+	// immediately) and process in-flight work on procBase (bounded drain grace),
+	// and they only run when the watch data plane is enabled. Each signals a done
+	// channel so shutdown can wait for its in-flight work before the DB pool closes.
 	watcherDone := make(chan struct{})
+	fetcherDone := make(chan struct{})
+	archiverDone := make(chan struct{})
 	if cfg.WatchEnable {
-		w := watcher.New(st, sg, rn, log, pfx.Output, pfx.Done, 2*time.Second)
+		// The watcher resolves each pipeline's storage from its own Source
+		// (per-source backend), uses the per-source done/quarantine/disposition,
+		// and falls back to sg/pfx for legacy pipelines.
+		w := watcher.New(st, sg, rn, log, pfx.Output, pfx.Done, 2*time.Second, s.Perf.MaxConcurrentFiles)
 		go func() { w.Run(ctx, procBase); close(watcherDone) }()
+
+		// SFTP fetch transport (single-owner): for each Source.Backend=="sftp"
+		// pipeline, streams new remote files into that pipeline's own input area
+		// (posix/s3) where the watcher then claims them. nil resolver defaults to
+		// storage.NewForSource.
+		f := fetcher.New(st, nil, log)
+		go func() { f.Run(ctx, procBase); close(fetcherDone) }()
+
+		// Archiver (single-owner): ages out DONE (and optionally QUARANTINED)
+		// files per pipeline.Archive into a compressed object on the destination
+		// backend, then prunes originals and records the AR/ARF audit trail.
+		a := archiver.New(st, sg, log)
+		go func() { a.Run(ctx, procBase); close(archiverDone) }()
 	} else {
 		close(watcherDone)
+		close(fetcherDone)
+		close(archiverDone)
 	}
 
 	httpSrv := &http.Server{Addr: listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
@@ -283,13 +331,24 @@ func run(s settings.Settings, log *slog.Logger, console func(string, ...any)) er
 	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
-	// Wait for the watcher to finish its in-flight file before the deferred DB
-	// pool close, so a completion never races a closing pool. The bound exceeds
-	// the drain grace after which any still-running file is hard-cancelled.
-	select {
-	case <-watcherDone:
-	case <-time.After(drainGrace + 5*time.Second):
-		log.Warn("watcher drain timed out", "component", "startup")
+	// Wait for the data-plane loops (watcher, fetcher, archiver) to finish their
+	// in-flight work before the deferred DB pool close, so a completion never
+	// races a closing pool. The bound exceeds the drain grace after which any
+	// still-running work is hard-cancelled.
+	drainDeadline := time.After(drainGrace + 5*time.Second)
+	for _, dl := range []struct {
+		name string
+		done <-chan struct{}
+	}{
+		{"watcher", watcherDone},
+		{"fetcher", fetcherDone},
+		{"archiver", archiverDone},
+	} {
+		select {
+		case <-dl.done:
+		case <-drainDeadline:
+			log.Warn("data-plane drain timed out", "component", "startup", "loop", dl.name)
+		}
 	}
 	log.Info("shutdown complete", "component", "startup")
 	console("stopped.\n")

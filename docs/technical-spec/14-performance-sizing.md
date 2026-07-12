@@ -211,6 +211,69 @@ Vertical scaling (`BR-NFR-021`) is therefore: more cores → raise
 `max_concurrent_files` (and `B` proportionally) → near-linear throughput until the
 shared FS or PostgreSQL bounds, since workers share almost nothing in memory.
 
+### As built (alpha) — hot path + file-worker pool, measured
+
+The alpha implements the two load-bearing rows of the table above:
+
+- **`max_concurrent_files`** — the watcher runs a bounded per-instance worker pool
+  (`internal/watcher`: semaphore + drain WaitGroup + an in-flight dedup map so a
+  file being processed is not re-submitted on the next scan tick; cross-instance
+  exclusivity remains the `FC` claim lease). Env `BAASPARSE_MAX_CONCURRENT_FILES`
+  / chart `perf.maxConcurrentFiles`, default 4. Every worker is panic-shielded and
+  the whole per-file handling is deadline-bounded (2×`MaxProcessing`) so a stalled
+  backend call can never pin a slot indefinitely.
+- **Buffered streaming** — input wrapped in a configurable read buffer
+  (`BAASPARSE_READ_BUFFER_BYTES`) and output in a configurable write buffer
+  (`BAASPARSE_WRITE_BUFFER_BYTES`), both defaulting to 64 KiB — the S3
+  round-trip lever.
+- **Archive containers stream at the same cost per record.** A tar.gz input adds
+  gunzip + tar framing and a shared encoder session across members; the decode →
+  transform → encode hot path is untouched, so per-record allocations stay at ~1.
+  The bomb guards (`BAASPARSE_ARCHIVE_MAX_{MEMBERS,MEMBER_BYTES,TOTAL_BYTES}` /
+  chart `archive.*`) are a byte counter under the tar reader — one comparison per
+  32 KiB block, unmeasurable against the decompression itself. Sizing note: an
+  archive's decompressed size has **no relation** to its size on disk (a 400 KB
+  file can hold 200 MB), so throughput and memory must be sized on the former.
+- **Allocation targets met on the DSV/JSON paths** — three hot-path codecs are
+  now hand-rolled rather than stdlib-generic, each verified against the previous
+  stdlib-based implementation by differential tests: the JSON encoder (direct
+  serialisation instead of reflection, reused decode record), the JSON decoder
+  (`internal/decoder/jsonfast.go` — flat-object parser with zero-copy substrings
+  off one per-line string, replacing `encoding/json`'s map + `UseNumber` + key
+  sort, which alone cost ~240 allocs/record), and the DSV encoder
+  (`internal/encoder/dsv.go` — reused buffer + cursor, quoting byte-compatible
+  with `encoding/csv`). Both directions now measure **~1 alloc/record**, meeting
+  the §14.3 targets (≤ 2 for the DSV-decode path, ≤ 6 for JSON);
+  `internal/pipeline/bench_test.go` (`-benchmem`) is the regression guard.
+
+Micro-bench, all three alpha format paths (decode → pass-through → encode,
+50 fields × 10 k rows, `internal/pipeline/bench_test.go`):
+
+| Path | Time/op | Throughput | Allocs/record | §14.3 target |
+|------|---------|------------|---------------|--------------|
+| DSV → JSON | 24 ms | 169 MB/s | ~1 | ≤ 2 — **met** |
+| JSON → DSV | 38 ms (was 253 ms — ×6.8) | 184 MB/s (was 27.6) | ~1 (was ~244) | ≤ 6 — **met** |
+| XML → JSON | 158 ms | 55 MB/s | ~305 | ≤ 6 — **documented exception** |
+
+**XML — documented exception to the §14.3 target table.** The alpha XML decoder
+(`internal/decoder/xml.go`) rides `encoding/xml`'s tokenizer; `RawToken` (no
+namespace resolution) is already applied, and the remaining ~305 allocs/record
+are the tokenizer's own per-token allocations — a floor the alpha cannot lower
+from outside the package. The trade is deliberate: entity, CDATA and
+well-formedness handling come from the stdlib. A custom streaming tokenizer to
+bring XML under the ≤ 6 target is future work, not an alpha commitment. (The
+hand-serialised XML *encoder*, `internal/encoder/xml.go`, is already on the
+precomputed-tags + reused-buffer pattern of its JSON/DSV siblings.)
+
+Cluster end-to-end (single pod, 50-field × 100 k-row file, including claim/DB
+bookkeeping and storage I/O): DSV-input path **~357 ms ≈ 280 k records/s** per
+worker; JSON → DSV **544 ms ≈ 184 k records/s**; XML → JSON **2.03 s ≈ 49 k
+records/s** — the ordering mirrors the micro-bench, i.e. codec cost, not the
+harness, dominates. Pool scaling (2 pods × 4 CPU): 40 files / 4 M records in
+**6.2 s wall ≈ 650 k records/s** aggregate with the pool (vs 10.2 s / 393 k rec/s
+forced sequential — ×1.65), exactly-once verified (40 distinct `DONE` rows, files
+split 23/17 across instances by claim contention).
+
 ## 14.5 Streaming guarantee walk-through (`BR-NFR-001`)
 
 **The 10 GB file.** A single file worker: bounded reader (256 KiB) → decoder produces

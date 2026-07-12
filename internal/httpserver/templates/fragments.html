@@ -18,6 +18,14 @@
 {{end}}
 {{end}}
 
+{{define "test_result"}}
+{{if .OK}}
+  <div class="result-bar"><span class="pill ok">✓ connected</span><span class="muted">{{.Detail}}</span></div>
+{{else}}
+  <div class="result-err">⚠ {{.Error}}</div>
+{{end}}
+{{end}}
+
 {{define "run_result"}}
 {{if .Error}}
   <div class="result-err">⚠ {{.Error}}</div>

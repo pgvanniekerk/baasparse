@@ -9,7 +9,7 @@
   <div class="card">
     {{if .Data}}
     <table class="tbl">
-      <thead><tr><th>File UID</th><th>Correlation</th><th>Pipeline</th><th>Input</th><th>Output</th><th>In</th><th>Out</th><th>Susp</th><th>Status</th><th>When (UTC)</th></tr></thead>
+      <thead><tr><th>File UID</th><th>Correlation</th><th>Pipeline</th><th>Input</th><th>Output</th><th>In</th><th>Out</th><th>Susp</th><th>Status</th><th>Reason</th><th>When (UTC)</th></tr></thead>
       <tbody>
       {{range .Data}}
         <tr>
@@ -17,11 +17,18 @@
           <td class="mono" title="correlation id / trace key for this file (search in Grafana/Loki)">#{{.FileUID}}</td>
           <td>{{.PipelineName}}</td>
           <td class="mono">{{.Name}}</td>
-          <td class="mono">{{.OutputName}}</td>
+          <td class="mono">{{if .OutputName}}{{.OutputName}}{{else}}—{{end}}</td>
           <td>{{.RecordsIn}}</td>
           <td>{{.RecordsOut}}</td>
           <td>{{if .Suspended}}<span class="pill warn">{{.Suspended}}</span>{{else}}0{{end}}</td>
-          <td><span class="pill ok">{{.Status}}</span></td>
+          <td>
+            {{if eq .Status "DONE"}}<span class="pill ok">DONE</span>
+            {{else if eq .Status "QUARANTINED"}}<span class="pill err">QUARANTINED</span>
+            {{else if eq .Status "SUSPENDED"}}<span class="pill warn">SUSPENDED</span>
+            {{else if eq .Status "ARCHIVED"}}<span class="pill">ARCHIVED</span>
+            {{else}}<span class="pill">{{.Status}}</span>{{end}}
+          </td>
+          <td class="mono muted" title="{{.Reason}}">{{if .Reason}}{{.Reason}}{{else}}—{{end}}</td>
           <td class="muted">{{.CollectedOn.Format "2006-01-02 15:04:05"}}</td>
         </tr>
       {{end}}

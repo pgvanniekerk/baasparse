@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -15,6 +16,8 @@ func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
+
+func isNoRows(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
 
 // Claim is an owned distributed file claim/lease (FC_FILE_CLAIM, BR-HA-003/004).
 type Claim struct {
@@ -186,10 +189,11 @@ func (p *PG) CompleteClaimed(ctx context.Context, pf ProcessedFile, c Claim) (bo
 // QuarantineFile records a poison file as QUARANTINED (BR-COL-017) and releases
 // the claim, fence-guarded and atomic. It appears in reconciliation as an
 // unprocessed/quarantined file-level state (BR-REC-008), neither lost nor done.
-func (p *PG) QuarantineFile(ctx context.Context, pipelineID, srcUID int64, name string, size int64, c Claim) (bool, error) {
+func (p *PG) QuarantineFile(ctx context.Context, pipelineID, srcUID int64, name string, size int64, reason string, c Claim) (bool, error) {
 	if p.insUID == nil {
 		return false, fmt.Errorf("instance not registered")
 	}
+	reasonCode, errorText := splitReason(reason)
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -219,9 +223,9 @@ func (p *PG) QuarantineFile(ctx context.Context, pipelineID, srcUID int64, name 
 	var pfUID int64
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO PF_PROCESSED_FILE (PF_FILE_UID, PF_SRC_UID, PF_PLV_UID, PF_NAME, PF_PATH, PF_SIZE_BYTES,
-			PF_STATUS, PF_RECON_STATE, PF_ATTEMPT_COUNT, PF_INS_UID, PF_CREATED_BY, PF_MODIFIED_BY)
-		VALUES ($1,$2,$3,$4,$4,$5,'QUARANTINED','INDETERMINATE_COUNT',$6,$7,'engine','engine') RETURNING PF_UID`,
-		fileUID, srcUID, plvUID, name, size, c.StallCount, p.insUID).Scan(&pfUID); err != nil {
+			PF_STATUS, PF_RECON_STATE, PF_ATTEMPT_COUNT, PF_REASON_CODE, PF_ERROR_TEXT, PF_INS_UID, PF_CREATED_BY, PF_MODIFIED_BY)
+		VALUES ($1,$2,$3,$4,$4,$5,'QUARANTINED','INDETERMINATE_COUNT',$6,NULLIF($7,''),NULLIF($8,''),$9,'engine','engine') RETURNING PF_UID`,
+		fileUID, srcUID, plvUID, name, size, c.StallCount, reasonCode, errorText, p.insUID).Scan(&pfUID); err != nil {
 		return false, fmt.Errorf("insert quarantined PF: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -293,6 +297,30 @@ func (p *PG) ReconcileOnce(ctx context.Context, fn func(context.Context) error) 
 		_, _ = conn.Exec(uctx, `SELECT pg_advisory_unlock(hashtext('baasparse.reconcile'))`)
 	}()
 	return true, fn(ctx)
+}
+
+// splitReason separates a quarantine reason into a short UPPER_SNAKE code (the
+// leading token before the first ':', as produced by the pipeline/runner error
+// convention TS 02 §2.3.1) and the full detail text. An empty reason yields the
+// generic PROCESSING_ERROR code.
+func splitReason(reason string) (code, text string) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return "PROCESSING_ERROR", ""
+	}
+	for i := 0; i < len(reason); i++ {
+		ch := reason[i]
+		if ch == ':' {
+			if i > 0 {
+				return reason[:i], reason
+			}
+			break
+		}
+		if !(ch >= 'A' && ch <= 'Z' || ch == '_') {
+			break
+		}
+	}
+	return "PROCESSING_ERROR", reason
 }
 
 // resolveSrcPlv finds the published source and pipeline-version for a pipeline.

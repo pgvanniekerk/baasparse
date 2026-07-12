@@ -3,6 +3,16 @@ kind: ConfigMap
 metadata:
   name: {{ include "baasparse.fullname" . }}
   labels: {{- include "baasparse.labels" . | nindent 4 }}
+  {{- if .Values.jobs.migrate.enabled }}
+  # Only when the pre-install migrate Job is enabled must this config exist before
+  # that Job runs — so it becomes a pre-install hook at a lower weight (-10) than
+  # the Job (-5), and persists for the app Deployment. When migrations are a devops
+  # step (the default), this is an ordinary resource created with the app.
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+  {{- end }}
 data:
   BAASPARSE_PORT: {{ .Values.port | quote }}
   BAASPARSE_DB_SCHEMA: {{ .Values.dbSchema | quote }}
@@ -20,6 +30,24 @@ data:
   {{- with (include "baasparse.otelEndpoint" .) }}
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ . | quote }}
   {{- end }}
+  {{- if .Values.perf.readBufferBytes }}
+  BAASPARSE_READ_BUFFER_BYTES: {{ .Values.perf.readBufferBytes | quote }}
+  {{- end }}
+  {{- if .Values.perf.writeBufferBytes }}
+  BAASPARSE_WRITE_BUFFER_BYTES: {{ .Values.perf.writeBufferBytes | quote }}
+  {{- end }}
+  {{- if .Values.perf.maxConcurrentFiles }}
+  BAASPARSE_MAX_CONCURRENT_FILES: {{ .Values.perf.maxConcurrentFiles | quote }}
+  {{- end }}
+  {{- if .Values.archive.maxMembers }}
+  BAASPARSE_ARCHIVE_MAX_MEMBERS: {{ .Values.archive.maxMembers | quote }}
+  {{- end }}
+  {{- if .Values.archive.maxMemberBytes }}
+  BAASPARSE_ARCHIVE_MAX_MEMBER_BYTES: {{ .Values.archive.maxMemberBytes | quote }}
+  {{- end }}
+  {{- if .Values.archive.maxTotalBytes }}
+  BAASPARSE_ARCHIVE_MAX_TOTAL_BYTES: {{ .Values.archive.maxTotalBytes | quote }}
+  {{- end }}
 ---
 {{/*
   The chart's own Secret always exists — it holds the bootstrap admin credentials
@@ -34,11 +62,24 @@ kind: Secret
 metadata:
   name: {{ include "baasparse.fullname" . }}
   labels: {{- include "baasparse.labels" . | nindent 4 }}
+  {{- if .Values.jobs.migrate.enabled }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+  {{- end }}
 type: Opaque
 stringData:
   {{- if not .Values.database.existingSecret }}
   DATABASE_URL: {{ .Values.database.url | quote }}
   {{- end }}
+  {{- /*
+    Hard-fail rather than deploy without a key. Silently omitting it makes each pod
+    derive its own, so a datasource credential encrypted by one replica is
+    undecryptable by another — a corruption that only shows up later, on the pod
+    that did not write it. An install-time error is far cheaper than that.
+  */}}
+  BAASPARSE_SECRET_KEY: {{ required "secretKey is required: it encrypts stored datasource credentials, must be identical on every replica, and cannot be rotated without losing them. Set it in deploy/local/values.local.yaml (see deploy/local/README.md) or from a Secret." .Values.secretKey | quote }}
   {{- if eq .Values.storage.backend "s3" }}
   BAASPARSE_S3_SECRET_KEY: {{ .Values.storage.s3.secretKey | quote }}
   {{- end }}

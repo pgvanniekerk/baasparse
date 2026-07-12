@@ -3,5 +3,5 @@
 /baasparse
 docs/**/.obsidian
 .git
-deploy/helm
+deploy
 *.md

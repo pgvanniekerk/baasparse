@@ -137,6 +137,74 @@ type Store interface {
   archive offload; the POSIX realisation is the direct filesystem calls of §4.1; the
   `s3` realisation adds object storage as a first-class backend (§4.2 topology B).
 
+### Datasources — reusable, named storage connections (`BR-STO-002`)
+
+The backend + root that `SRC_STORAGE` (§4.8) names per source is, operationally, a
+**connection** an operator wants to reuse across many pipelines. `DSR_DATASOURCE`
+(§4.8, `.db/schema.sql` §3.4.9) promotes that connection to a first-class, **named**
+registry entity so it is defined once and selected by reference:
+
+- **Connection only — no per-pipeline specifics.** A datasource holds a `posix` working
+  directory (`Root`) **or** an `s3` endpoint + region + credentials — and deliberately
+  **not** the S3 bucket (chosen per pipeline) nor the lifecycle sub-directories (derived
+  per pipeline, below). Identity + kind are relational (`DSR_NAME`,
+  `DSR_KIND ∈ {posix, s3}`); the connection blob — including the S3 secret key,
+  encrypted through the same `internal/secret` AES-GCM path as the `SRC`/`PLV` JSONB
+  (`BR-NFR-054`) — lives in `DSR_CONFIG`.
+- **Reference, not copy.** A pipeline links a datasource **by id inside its
+  `PLV_STAGE_GRAPH` document** — `Source.DatasourceID` (input), `Source.OutputDatasourceID`
+  (output/done), `Source.OutputBucket` (per-pipeline S3 bucket) — so nothing FKs into
+  `DSR_DATASOURCE`. The store **materialises** the reference at read time
+  (`applyDatasources`, `internal/store/datasource.go`): the input datasource fills the
+  source backend/root/credentials (`Source`), and a distinct output datasource becomes
+  the pipeline's output/done destination (`OutputDest`). Inline-config pipelines
+  (`DatasourceID = 0`) are left verbatim — the model is fully backward-compatible.
+- **Soft delete.** `DSR_STATUS ∈ {ACTIVE, DISABLED}` with a partial-unique index
+  `UX_DSR_NAME_ACTIVE (DSR_NAME) WHERE DSR_STATUS = 'ACTIVE'`; deleting a datasource sets
+  `DISABLED` (never a row delete) so a pipeline still referencing it keeps resolving —
+  config is data, never destroyed.
+- Store surface `ListDatasources` / `GetDatasource` / `CreateDatasource` /
+  `DeleteDatasource`, managed through the GUI's `/datasources` CRUD pages with a **Test
+  connection** probe (a posix write/read/delete round-trip, or an S3 `ListBuckets`
+  reachability check when the connection carries no bucket, a probe object when one is
+  given — `storage.TestConnection`).
+
+**Per-pipeline lifecycle prefix.** Because one datasource hosts many pipelines, each
+pipeline's lifecycle areas default to a **pipeline-scoped prefix** under the datasource
+root: `<slug(name)>-<id>/{input, in-progress, done, quarantine, output}`. The slug is
+derived from the pipeline name (lower-cased, each run of non-alphanumerics collapsed to a
+single `-`); the pipeline **id** is appended because `slug()` is not injective —
+`cdr-in`, `cdr_in` and `cdr in` all slug to `cdr-in`, so without the id two distinct
+pipelines could alias to the same directories and **double-process the same files**.
+These are the relative keys/prefixes of §4.8 under the datasource's backend + root — real
+directories on `posix`, object-key prefixes on `s3`.
+
+**Cross-backend pipelines — read one datasource, write another (`BR-STO-002`).**
+Selecting a **distinct** output datasource splits the data plane into a **source store**
+(input, in-progress, quarantine) and a **dest store** (output, done, completion markers)
+— e.g. read from S3, land done/output on a local filesystem. `Pipeline.CrossBackend()`
+reports the split and `OutputDest` carries the resolved destination
+(`internal/store/store.go`; data plane in `internal/watcher/watcher.go`,
+`internal/runner/runner.go`). Because `Store.Move` is same-store only, the cross-store
+lifecycle move is a new primitive `storage.Relocate(dst, dstKey, src, srcKey)`
+(`internal/storage/ops.go`): a native `Move` when source and dest resolve to the same
+store, otherwise a streamed `Put` (dest) then `Delete` (source) — the source is removed
+only after the destination write succeeds, so an interrupted relocate never loses the
+original (`BR-STO-004`). The store cache keys (`storage.SourceKey` / `DestKey`,
+`internal/storage/resolve.go`) include endpoint | bucket | region | access-key | TLS, so
+two datasources on the same bucket that authenticate differently resolve to **separate**
+`Store` instances rather than silently sharing one.
+
+**Filesystem auto-provisioning on pipeline create.** §4.1 rule 3 (the engine creates
+absent directories) is realised eagerly for filesystem-backed pipelines: creating a
+pipeline pre-creates its lifecycle tree via `storage.EnsureTree`, which writes a
+dot-prefixed `.keep` marker into each directory so an operator can drop input files
+immediately. Input/in-progress/quarantine are created on the **source** store,
+done/output on the **dest** store. **Object-storage backends are skipped** — S3 prefixes
+are virtual, so an empty prefix needs no `mkdir`. The hook runs after `CreatePipeline`
+(`handlePipelineCreate → provisionDirs`, `internal/httpserver/datasource_handlers.go`)
+and is best-effort: a provisioning error is logged, never fatal.
+
 ---
 
 ## 4.2 File lifecycle overview
@@ -697,6 +765,58 @@ byte offset, diagnostic only); takeover resume always **re-streams from the star
 emission suppressed** up to the ordinal (§4.4.13) — compression changes nothing,
 because no resume path seeks.
 
+**As built (alpha) — multi-member archive containers, and the phased plan.**
+The alpha extends this section with **tar.gz containers**: one collected object
+holding *many* member CDR files (`internal/container`). Format choice is driven by
+streamability — **tar.gz is the streaming-read format** (gzip and tar are both
+sequential; memory stays bounded at the gzip window + read buffer regardless of
+archive size), whereas true zip cannot be purely streamed on principle (its central
+directory sits at EOF; it needs `io.ReaderAt` — trivial on POSIX, ranged GETs on S3).
+Semantics as built:
+
+- **Config**, in the input Format Definition: `container: "" | "targz"` plus a
+  `memberGlob` matched against each member's **base name** (default `*`). The
+  container is a layer *above* the decoder seam: members are decoded by the
+  pipeline's ordinary DSV/JSON/XML decoder, one fresh decoder per member, one
+  shared encoder session across members (one output, header written once).
+- **Unit of work = the archive**: one claim/lease, one `PF` row, one done/quarantine
+  move, one completion marker (which records the member count). Member-level detail
+  aggregates into the file-scope reconciliation counts.
+- **Error semantics**: a member that fails to decode quarantines the **whole
+  archive** with the member named in the reason (`DECODE_ERROR: member "x.csv": …`)
+  — an archive is one blob and cannot be split for quarantine. Extract-bad-member-
+  and-continue is a v2 refinement.
+- **Safety limits** (decompression-bomb guards, enforced on the fly while
+  streaming; breach → quarantine with `ARCHIVE_LIMIT_EXCEEDED`): max member count,
+  max per-member decompressed bytes, max total decompressed bytes
+  (`BAASPARSE_ARCHIVE_MAX_{MEMBERS,MEMBER_BYTES,TOTAL_BYTES}`). Only regular-file
+  members are read (symlinks/devices skipped); member names are never used as
+  filesystem paths; **no recursion** into nested archives.
+  - The total guard meters the **whole decompressed stream** — tar headers,
+    padding, and the bodies of members we never hand to the decoder — not just
+    record bytes, and every regular-file entry counts toward the member cap
+    whether or not it matches `memberGlob`. This is load-bearing: tar is
+    sequential, so the reader must decompress a member's body to reach the next
+    header. Metering only *selected* members would let an archive hide its payload
+    behind a name the pipeline does not select and inflate without bound. The
+    counter therefore sits **below** the tar reader, where no byte can get past it.
+  - The gzip trailer (CRC32/ISIZE) is read at end-of-archive, so a **truncated or
+    corrupted** archive fails instead of completing as a short, clean run.
+- **Error attribution.** A failing input stream must not be misread as bad
+  content. Decoders manufacture parse errors out of bytes they read cleanly;
+  stream failures (limit breach, torn object read, cancellation) pass *through*
+  the reader, so the runner captures them at that seam and classifies on the cause,
+  not on whatever the decoder made of the truncation. A `LimitError` stays
+  `ARCHIVE_LIMIT_EXCEEDED`; a structurally broken archive (bad gzip header/CRC,
+  malformed tar) is content and quarantines; **any other stream failure is
+  transient and retried** rather than condemning a file that is probably fine.
+
+**Phasing** (input side; output phasing in [[07-distribution-delivery]] §7.3):
+phase 1 (built) = `targz` containers + plain single-stream `.gz`; phase 2 = resume
+checkpoint per member on the claim; phase 3 = **zip input** via `io.ReaderAt`
+(POSIX native; S3 via ranged reads), superseding this section's single-entry-zip
+expectation with proper multi-entry support.
+
 ### 4.4.9 Integrity/authenticity check (`BR-COL-014`)
 
 Optional per pipeline, `collection.integrity`:
@@ -1240,6 +1360,25 @@ section — relational where reconciliation/queries need them, JSONB where decla
 | `SRC_FETCH_POLICY` | JSONB | `remotePath` + `match` (`BR-RMT-002`) · `onFetched` override of `RE_POST_FETCH` (`BR-RMT-006`) · `refetchPolicy` (`BR-RMT-005`) · `remoteChecksum` sidecar (`BR-RMT-004`) · `stagingQuota` (`BR-RMT-013(b)`); the poll schedule lives on the source's `SJ_SCHEDULED_JOB` `FETCH` row (`SJ_SCHEDULE`, `BR-RMT-007`) |
 | `SRC_STORAGE` | JSONB | storage backend + root for the source's working area — `{"backend": "posix"\|"sftp"\|"s3", "root": "<dir-or-bucket>"}` (`BR-STO-002`; default `{"backend":"posix"}` = topology A). The lifecycle-directory fields above are the relative **keys/prefixes** under this backend + root (real directories on `posix`/`sftp`, object-key prefixes on `s3`); atomic writes and the `input → in-progress → done` move are realised per backend (§4.1, `BR-STO-004`) |
 
+The `SRC_STORAGE` backend + root may be supplied **inline** (as above) or **by
+reference** to a reusable `DSR_DATASOURCE` (§4.1 "Datasources"): a pipeline names a
+datasource id inside its `PLV_STAGE_GRAPH` document and the store materialises it into
+`SRC_STORAGE` at read time, so inline sources remain valid and unchanged.
+
+### `DSR_DATASOURCE` (reusable storage connections)
+
+| Field | Type | Drives |
+|-------|------|--------|
+| `DSR_NAME` | TEXT | identity — unique among live datasources (`UX_DSR_NAME_ACTIVE (DSR_NAME) WHERE DSR_STATUS='ACTIVE'`) |
+| `DSR_KIND` | TEXT CHECK (`posix`/`s3`) | connection backend (`BR-STO-002`) |
+| `DSR_CONFIG` | JSONB | connection only — posix `root`, or s3 `endpoint`+`region`+credentials (S3 secret key encrypted via `internal/secret`, `BR-NFR-054`); **no bucket** (per-pipeline) and no lifecycle prefixes (derived per pipeline, §4.1) |
+| `DSR_STATUS` | TEXT CHECK (`ACTIVE`/`DISABLED`) | soft-delete — a `DISABLED` datasource still resolves for referencing pipelines (config never destroyed) |
+| `DSR_CREATED_BY/ON`, `DSR_MODIFIED_BY/ON` | TEXT / TIMESTAMPTZ | audit |
+
+Pipeline-side reference fields (in `PLV_STAGE_GRAPH`, materialised by `applyDatasources`):
+`datasourceId` (input), `outputDatasourceId` (distinct output/done backend → cross-backend,
+§4.1), `outputBucket` (per-pipeline S3 bucket). No table FKs into `DSR_DATASOURCE`.
+
 ### `RE_REMOTE_ENDPOINT`
 
 | Field | Type | Drives |
@@ -1333,7 +1472,7 @@ outcomes and backlog of over-age unarchived files.
 | BR-ARC-009 | §4.5.8 (`AR_ARCHIVE_RUN` / `ARF_ARCHIVE_RUN_FILE`) |
 | BR-ARC-010 | §4.5.4 (integrity manifest) |
 | BR-STO-001 | §4.1 (storage `Ref` model; content never in PG — `BR-NFR-009`) |
-| BR-STO-002 | §4.1, §4.3.1, §4.8 (`posix`/`sftp`/`s3` backends, per source/destination; `SRC_STORAGE`) |
+| BR-STO-002 | §4.1, §4.3.1, §4.8 (`posix`/`sftp`/`s3` backends, per source/destination; `SRC_STORAGE`; `DSR_DATASOURCE` named connections + cross-backend output datasource) |
 | BR-STO-003 | §4.2, §4.4.1, §4.4.10 (abstract PG state + object placement; instance-local scratch, no RWX) |
 | BR-STO-004 | §4.1, §4.4.10 (atomic write on every backend — rename / `PutObject`) |
 | BR-STO-005 | §4.1, §4.3.7 (TLS in transit; SSE-S3/SSE-KMS at rest) |
@@ -1345,8 +1484,12 @@ outcomes and backlog of over-age unarchived files.
 
 ## Registry additions
 
-None — the [[02-conventions]] §2.2 registry is final and all behaviour in this section
-lands on tables already registered there (`SRC_SOURCE`, `RE_REMOTE_ENDPOINT`,
+One (cloud-native track) — `DSR_DATASOURCE`, the reusable storage-connection registry
+(§4.1 "Datasources", §4.8): an identity row + encrypted `DSR_CONFIG` blob with the
+`UX_DSR_NAME_ACTIVE` partial-unique index, referenced by pipelines from
+`PLV_STAGE_GRAPH` (no FK) and soft-deleted (`DISABLED`) so referencing pipelines keep
+resolving. The remaining behaviour in this section lands on tables already registered in
+the [[02-conventions]] §2.2 registry (`SRC_SOURCE`, `RE_REMOTE_ENDPOINT`,
 `AP_ARCHIVE_POLICY`, `FR_FETCH_REGISTRY`, `PF_PROCESSED_FILE`, `FC_FILE_CLAIM`,
 `SQ_SEQUENCE_ALLOCATOR`, `SJ_SCHEDULED_JOB`, `AR_ARCHIVE_RUN`, `ARF_ARCHIVE_RUN_FILE`;
 the collect transaction seeds `RS_RECONCILIATION_SUMMARY`, §4.4.4; intake gating reads

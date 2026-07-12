@@ -46,6 +46,34 @@
     </div>
   </section>
 
+  {{if .Data.Deliveries}}
+  <div class="card">
+    <div class="card-head"><h2>Deliveries</h2>
+      <span class="muted">one output object per destination, per batch</span>
+    </div>
+    <table class="tbl">
+      <thead><tr><th>Destination</th><th>Seq</th><th>Output</th><th>Files in</th><th>Records</th><th>Size</th><th>Status</th></tr></thead>
+      <tbody>
+      {{range .Data.Deliveries}}
+        <tr>
+          <td><b>{{.Destination}}</b></td>
+          <td class="mono">{{.SequenceNo}}</td>
+          <td class="mono">{{.OutputName}}</td>
+          <td>{{if .FileCount}}{{.FileCount}}{{else}}—{{end}}</td>
+          <td>{{.Records}}</td>
+          <td class="mono muted">{{.SizeBytes}}</td>
+          <td>
+            {{if eq .Status "DELIVERED"}}<span class="tag ok">delivered</span>
+            {{else}}<span class="tag warn" title="{{.LastError}}">pending — retrying</span>{{end}}
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+    <p class="hint">A <b>pending</b> destination is retried on its own; the destinations that already delivered keep their output and are never re-sent. The sequence number is reserved per batch, so a gap means a genuinely missing output — not a failed attempt.</p>
+  </div>
+  {{end}}
+
   <div class="card">
     <div class="card-head"><h2>Processed files</h2></div>
     {{if .Data.Files}}

@@ -1,0 +1,55 @@
+{{define "datasource_new"}}<!doctype html>
+<html lang="en">{{template "head" .}}
+<body class="app">
+{{template "nav" .}}
+<main class="content">
+  <header class="topbar">
+    <div><h1>New datasource</h1><p class="sub">Define a storage connection and test it. Buckets and per-pipeline folders are chosen later, when you build a pipeline.</p></div>
+    <a class="btn ghost" href="/datasources">Cancel</a>
+  </header>
+
+  <form method="post" action="/datasources" class="builder" style="max-width:760px">
+    {{if .Data}}{{if .Data.Error}}<div class="wiz-err" role="alert">{{.Data.Error}}</div>{{end}}{{end}}
+
+    <div class="card">
+      <div class="card-head"><h2>Datasource</h2></div>
+      <div class="field"><label>Name</label><input name="ds_name" placeholder="local-file-store" required></div>
+      <div class="field"><label>Kind</label>
+        <div class="seg" data-seg="dskind">
+          <label class="segbtn on"><input type="radio" name="ds_kind" value="posix" checked data-action="ds-kind"> Local filesystem</label>
+          <label class="segbtn"><input type="radio" name="ds_kind" value="s3" data-action="ds-kind"> S3 / object store</label>
+        </div>
+      </div>
+
+      <div data-dskind="posix">
+        <div class="field"><label>Working directory <small>(a path inside the mounted volume)</small></label>
+          <input name="ds_root" class="mono" placeholder="/data/file_data"></div>
+        <p class="hint">Each pipeline that uses this datasource gets its own <span class="mono">&lt;pipeline&gt;/input · in-progress · done · quarantine · output</span> tree created under this directory.</p>
+      </div>
+
+      <div data-dskind="s3" hidden>
+        <div class="grid2">
+          <div class="field"><label>Endpoint</label><input name="ds_s3_endpoint" class="mono" placeholder="minio:9000"></div>
+          <div class="field"><label>Region</label><input name="ds_s3_region" class="mono" placeholder="us-east-1"></div>
+          <div class="field"><label>Access key</label><input name="ds_s3_access_key" class="mono"></div>
+          <div class="field"><label>Secret key</label><input type="password" name="ds_s3_secret_key" class="mono" autocomplete="new-password"></div>
+        </div>
+        <div class="field row"><label class="check"><input type="checkbox" name="ds_s3_use_ssl"> Use TLS</label></div>
+        <div class="field"><label>Bucket to test <small>(optional — leave blank to just verify the connection)</small></label>
+          <input name="ds_s3_bucket" class="mono" placeholder="(only used for this test)"></div>
+        <p class="hint">The bucket for each pipeline is chosen when you create the pipeline; this datasource stores only the endpoint and credentials.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Test &amp; save</h2></div>
+      <div class="result-bar">
+        <button type="button" class="btn" data-action="test-conn" data-url="/datasources/test" data-target="#test-out">Test connection</button>
+        <button type="submit" class="btn primary">Save datasource</button>
+      </div>
+      <div id="test-out"></div>
+    </div>
+  </form>
+</main>
+{{template "foot" .}}
+</body></html>{{end}}

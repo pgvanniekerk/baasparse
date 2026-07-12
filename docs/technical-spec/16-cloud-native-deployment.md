@@ -75,6 +75,64 @@ SFTP, process against S3 working prefixes, archive to a *different* S3 bucket �
 entirely on a shared POSIX FS. This is what keeps traditional SFTP/filesystem mediation
 fully supported alongside cloud object storage.
 
+**Datasources — the reusable storage front end.** In the alpha an operator does not inline
+backend + root into each pipeline; instead they define named, reusable **datasources** and a
+pipeline *selects* one for input and (optionally) a distinct one for output. A datasource
+holds only the **connection** — a POSIX working directory (`Root`) or an S3 **endpoint +
+region + credentials** — and deliberately **no bucket**: the bucket is chosen per pipeline,
+so one S3 connection serves many pipelines and buckets. Datasources are the concrete front
+end of the Storage abstraction: at read time `applyDatasources` materialises a pipeline's
+datasource references into the per-pipeline `Source`/`OutputDest` config the data plane
+already consumes. They persist in a new **`DSR_DATASOURCE`** table (additive to the 0001
+baseline; no table FKs into it — pipelines link it by id inside the `PLV_STAGE_GRAPH` JSONB
+doc via `Source.DatasourceID` / `Source.OutputDatasourceID` / `Source.OutputBucket`):
+
+| Column | Meaning |
+|--------|---------|
+| `DSR_UID` | identity PK; the id pipelines reference |
+| `DSR_NAME` | display name; unique among ACTIVE rows (`UX_DSR_NAME_ACTIVE` partial-unique index) |
+| `DSR_KIND` | `posix` \| `s3` (`CK_DSR_KIND`) |
+| `DSR_CONFIG` | JSONB connection blob; the S3 secret key is **encrypted** via `internal/secret` (AES-GCM) — the same pattern as `SRC`/`PLV` JSONB (`BR-NFR-054`) |
+| `DSR_STATUS` | `ACTIVE` \| `DISABLED` — **soft-delete**: a removed datasource is set DISABLED, never dropped, so pipelines still referencing it by id keep resolving |
+| audit cols | `DSR_CREATED_BY/ON`, `DSR_MODIFIED_BY/ON` |
+
+- **Backward compatible.** A pipeline with no datasource (`DatasourceID == 0`) keeps its
+  inline `Source` verbatim — nothing about the base data plane changes.
+- **Per-pipeline lifecycle dirs.** When a datasource is selected, the pipeline's lifecycle
+  areas default to a **`<slug(name)>-<id>/{input,in-progress,done,quarantine,output}`**
+  prefix; the pipeline id makes the prefix unique (the slug alone is not injective), so many
+  pipelines can share one datasource without aliasing onto each other's files.
+- **Store & GUI surface.** `Store` gains
+  `ListDatasources/GetDatasource/CreateDatasource/DeleteDatasource`; the GUI adds
+  `/datasources` CRUD pages, a **Test connection** probe (`storage.TestConnection` — a POSIX
+  write/read/delete round-trip, or an S3 `ListBuckets` when no bucket is given / a probe
+  object when one is), and a datasource picker in the pipeline-creation wizard (input
+  datasource + optional distinct output datasource + per-pipeline bucket).
+
+**Cross-backend pipelines.** Because input and output are chosen independently, a single
+pipeline can **read from one backend and write to another** — e.g. read input from S3 and
+land `done/` + `output/` on a local filesystem. `Pipeline.OutputDest` /
+`Pipeline.CrossBackend()` capture this, and the data plane (watcher + runner) splits into a
+**SOURCE store** (`input`, `in-progress`, `quarantine`) and a **DEST store** (`output`,
+`done`, completion markers). Since `Store.Move` is same-store only, a new primitive
+**`storage.Relocate(dst, dstKey, src, srcKey)`** performs the lifecycle transition: a
+backend-native `Move` when source and destination resolve to the same store, otherwise a
+**stream `Put` then `Delete`** that removes the source only after the destination write
+succeeds (a failed transfer never loses the original). Store instances are cached by a key
+(`SourceKey`/`DestKey`, `internal/storage/resolve.go`) that includes
+`endpoint|bucket|region|accessKey|useSSL`, so two datasources on the same bucket that
+authenticate differently resolve to **separate** stores rather than silently sharing one's
+credentials. Startup reconciliation reads completion markers from the **DEST** store for
+cross-backend pipelines (§16.6).
+
+**Directory auto-provisioning (POSIX).** Creating a filesystem-backed pipeline pre-creates
+its lifecycle directory tree (`storage.EnsureTree`, writing a dot-prefixed `.keep` marker
+that detection ignores) so an operator can drop files into the input area immediately:
+`input`/`in-progress`/`quarantine` on the SOURCE store and `done`/`output` on the DEST
+store. Object-storage backends have virtual prefixes and are skipped. The hook runs after
+`CreatePipeline` (`handlePipelineCreate → provisionDirs`) and is best-effort — a failure is
+logged, never fatal.
+
 ## 16.3 Two topologies, one lifecycle
 
 The **record lifecycle** (`BR-COL-009`, input → in-progress → done → archive) is defined
@@ -202,6 +260,24 @@ DEP ..> OBS : /metrics (ServiceMonitor fallback)
 - **Image:** multi-stage build → **static Linux binary** (pgx is pure-Go; `CGO_ENABLED=0`)
   on **distroless/scratch**, **non-root**, **read-only root filesystem** with an `emptyDir`
   scratch mount for processing and `/tmp`.
+- **POSIX filesystem mount (local datasources).** To back a "local filesystem" datasource in
+  K8s, the chart mounts a host directory into the pods (the `posixData` block: host
+  `~/baasparse/file_data` → container `/data/file_data`, with a datasource `Root` under
+  `mountPath`). On a single-node dev cluster all replicas share the one host directory —
+  safe because claims/leases coordinate in PostgreSQL, not on the filesystem; a real
+  multi-node cluster needs an RWX `PersistentVolume` (NFS/CephFS) instead of `hostPath`.
+  Three settings make a non-root, read-only-rootfs pod work against a `hostPath`:
+  - **`runAsUser: 1000`** (also `runAsGroup`/`fsGroup`) so app-created files under the mount
+    are owned by the host user — kubelet does **not** apply `fsGroup` to `hostPath` volumes,
+    so the container uid must match the host owner directly.
+  - **`HOME=/tmp`** — running as a non-image uid makes the image's `$HOME` (`/home/nonroot`,
+    owned by the image uid) unreadable, and the config loader treats an unreadable HOME as
+    fatal; pointing HOME at the writable `emptyDir` scratch resolves it (runtime config still
+    comes from env).
+  - **a stable `BAASPARSE_SECRET_KEY`** shared across all replicas — the read-only root
+    filesystem blocks the `~/.baasparse/secret.key` generation fallback, and a per-pod
+    ephemeral key would make a credential encrypted by one pod undecryptable by another
+    (`BR-NFR-054`).
 
 ### 16.6 Migrations in Kubernetes
 
@@ -269,6 +345,23 @@ P --> AM : alert rules
 - **Grafana dashboards** shipped as ConfigMaps: per-pipeline throughput, reconciliation
   (in vs out vs suspended vs open), backlog/latency, disk/object-store pressure, replication
   lag, cluster/instance health.
+
+**Alpha realisation on microk8s.** The concrete stack is the microk8s **`observability`
+addon** (kube-prometheus-stack: **Prometheus + Grafana + Alertmanager**, plus **Loki +
+Promtail** for logs) with **Tempo** added for traces. The app is OpenTelemetry-instrumented
+and wires up as follows:
+
+- **Metrics** are exposed by the app's OTel **Prometheus exporter at `/metrics`** on each
+  pod and scraped by the addon's Prometheus via a **`PodMonitor`** (`deploy/observability/`)
+  — not a ServiceMonitor. The exported catalog: counters `baasparse_files_processed_total`,
+  `baasparse_files_quarantined_total{pipeline,reason_code}` (new this alpha),
+  `baasparse_records_in_total` / `_out_total` / `_suspended_total`; and the histogram
+  `baasparse_file_processing_seconds`.
+- **Logs** are JSON on **stdout**, collected by **Promtail** into **Loki** with no app
+  change; each line carries `trace_id` and `correlationID` as the log↔trace join keys.
+- **Traces** are exported over OTLP to the **bundled OTel Collector**
+  (`deploy/helm/.../otel-collector.yaml`), which forwards to **Tempo**; all three signals
+  are explored in **Grafana**.
 
 ## 16.9 Security, config & secrets (reconciling the alpha)
 

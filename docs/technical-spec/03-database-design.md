@@ -346,6 +346,7 @@ entity RD_REFERENCE_DATASET
 entity RDV_REFERENCE_DATA_VERSION
 entity RDR_REFERENCE_DATA_ROW
 entity "CG_CORRELATION_GROUP (v2)" as CG
+entity "DSR_DATASOURCE (cloud-native)" as DSR
 SRC_SOURCE }o--o| RE_REMOTE_ENDPOINT : fetches via
 SRC_SOURCE }o--o| AP_ARCHIVE_POLICY : archived by
 AP_ARCHIVE_POLICY }o--|| RE_REMOTE_ENDPOINT : offloads via
@@ -357,6 +358,7 @@ PLV_PIPELINE_VERSION ..> DS_DESTINATION : routes to (by version-row UID)
 RD_REFERENCE_DATASET ||--o{ RDV_REFERENCE_DATA_VERSION
 RDV_REFERENCE_DATA_VERSION ||--o{ RDR_REFERENCE_DATA_ROW : partition per version
 CG ..> PL_PIPELINE : participating pipelines (v2)
+PLV_PIPELINE_VERSION ..> DSR : storage connection\n(by id in stage-graph JSONB)
 @enduml
 ```
 
@@ -848,6 +850,58 @@ CREATE TABLE CG_CORRELATION_GROUP (
 -- plus temporal indexes (§3.2)
 ```
 
+### 3.4.10 `DSR_DATASOURCE` — reusable storage connections *(cloud-native track, `BR-STO-002`)*
+
+A **named, reusable storage connection** a pipeline selects as its input and/or output
+location, so the same backend (a POSIX working directory or an S3-compatible endpoint) is
+defined once and shared across pipelines. It holds only the **connection** — never the
+bucket or the lifecycle sub-directories, which are per-pipeline. Additive to the 0001
+baseline; **no other table FKs into it** — a pipeline links a datasource by **id inside its
+`PLV_STAGE_GRAPH` JSONB** (the stage-graph `Source` carries `DatasourceID`,
+`OutputDatasourceID`, and a per-pipeline `OutputBucket`), which the store materialises into
+runtime storage config at read time (`applyDatasources`). This keeps the reference in the
+declarative body (`BR-CFG-002`) rather than adding a relational FK, and leaves
+**inline-config pipelines (`DatasourceID == 0`) unchanged** — fully backward-compatible.
+
+```sql
+CREATE TABLE DSR_DATASOURCE (
+  DSR_UID         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  DSR_NAME        TEXT        NOT NULL,
+  DSR_KIND        TEXT        NOT NULL, -- backend family: 'posix' (working directory) or 's3'
+                                        -- (endpoint + region + credentials) — configurable per source and
+                                        -- per destination (BR-STO-002, [[16-cloud-native-deployment]] §16.2)
+  DSR_CONFIG      JSONB       NOT NULL, -- connection body: posix {root} OR s3 {endpoint, region, accessKey,
+                                        -- secretKey, useSSL} — NO bucket (per-pipeline). The S3 secret key is
+                                        -- AES-256-GCM encrypted in-place (internal/secret), mirroring the
+                                        -- SRC/PLV encrypted-JSONB pattern; ciphertext, never plaintext
+  DSR_STATUS      TEXT        NOT NULL DEFAULT 'ACTIVE',
+  DSR_CREATED_BY  TEXT        NOT NULL,
+  DSR_CREATED_ON  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  DSR_MODIFIED_BY TEXT        NOT NULL,
+  DSR_MODIFIED_ON TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT CK_DSR_KIND   CHECK (DSR_KIND IN ('posix','s3')),
+  CONSTRAINT CK_DSR_STATUS CHECK (DSR_STATUS IN ('ACTIVE','DISABLED'))
+);
+-- name is unique among ACTIVE datasources only; a soft-delete sets DISABLED
+CREATE UNIQUE INDEX UX_DSR_NAME_ACTIVE ON DSR_DATASOURCE (DSR_NAME) WHERE DSR_STATUS = 'ACTIVE';
+```
+
+Unlike the §3.2 configuration tables this is a **flat identity row**, not a temporal
+version chain — the connection is edit-in-place operational config, not a published-version
+lineage. **Soft-delete** follows the `U_USER` model (§3.3.1): `DeleteDatasource` flips
+`DSR_STATUS` to `DISABLED` rather than removing the row, so a pipeline still referencing the
+datasource by id **continues to resolve** (`GetDatasource` returns disabled rows); the
+partial-unique `UX_DSR_NAME_ACTIVE` frees the name for re-use while the disabled history
+survives. The store surface is `ListDatasources` / `GetDatasource` / `CreateDatasource` /
+`DeleteDatasource`. Because a datasource carries only the connection, a pipeline's lifecycle
+directories default to a name-scoped prefix on the shared backend —
+`<slug(name)>-<id>/{input,in-progress,done,quarantine,output}` — the pipeline id guaranteeing
+uniqueness where two names slug alike. A pipeline may point its **output/done** side at a
+*different* datasource from its input, so input can be read from one backend and results
+written to another (e.g. read S3 → write done to a local filesystem); the data plane splits
+into a source store (input, in-progress, quarantine) and a dest store (done, output,
+completion markers) accordingly ([[16-cloud-native-deployment]] §16.2–§16.3).
+
 ---
 
 ## 3.5 Operational domain
@@ -939,6 +993,14 @@ CREATE TABLE PF_PROCESSED_FILE (
   PF_RECON_STATE       TEXT        NOT NULL DEFAULT 'PENDING',
                                              -- INDETERMINATE_COUNT: quarantined before full decode — records
                                              -- confirmed to checkpoint, remainder unknown (BR-REC-001)
+  PF_REASON_CODE       TEXT        NULL,     -- quarantine/failure reason CODE — the leading UPPER_SNAKE token
+                                             -- of the reason (e.g. 'DECODE_ERROR' for a content failure,
+                                             -- 'STALLED' for the poison-stall heuristic; 'PROCESSING_ERROR'
+                                             -- when uncoded). Set when PF_STATUS='QUARANTINED' (BR-COL-017);
+                                             -- NULL otherwise. Also the low-cardinality metric label on
+                                             -- baasparse_files_quarantined_total{reason_code}
+  PF_ERROR_TEXT        TEXT        NULL,     -- full human-readable failure message backing PF_REASON_CODE;
+                                             -- surfaced on the GUI processed-files page. NULL when no failure
   PF_DECLARED_COUNT    BIGINT      NULL,     -- trailer-declared record count where present (BR-VAL-006)
   PF_RECORD_COUNT      BIGINT      NULL,     -- authoritative input total once fully decoded; 0 is valid
                                              -- (zero-record files are accepted and recorded, BR-COL-016)
@@ -988,6 +1050,17 @@ be `DONE` yet is pinned on disk until they resolve (`BR-ERR-008`, checked via
 `IX_SU_PF_OPEN` below). Re-arrival detection is a lookup on name and/or checksum per
 source policy — deliberately **not** a unique constraint, since whether name-match alone
 is a duplicate is per-source configuration (`BR-COL-006`).
+
+**Quarantine reason (`PF_REASON_CODE` / `PF_ERROR_TEXT`).** A `QUARANTINED` row carries
+*why* it failed: a genuine decode/content failure quarantines the file **immediately** with
+its reason (`BR-COL-017`) rather than retrying a file that will never parse, and the
+poison-stall heuristic (`FC_STALL_COUNT` exhausted, §3.5.2) records `STALLED`. Write-side
+and infrastructure faults (a destination outage, DB error, context cancellation) are
+**retryable — never quarantined**, so they never populate these columns. The reason string
+is split on its leading token: `PF_REASON_CODE` gets the UPPER_SNAKE code (the low-cardinality
+metric label), `PF_ERROR_TEXT` the full message the GUI shows. Both are **nullable** and unset
+for non-failed files. Added to the 0001 baseline additively via idempotent
+`ALTER TABLE … ADD COLUMN IF NOT EXISTS` (`BR-HA-011`), needing no backfill.
 
 **Storage-reference model (`BR-STO-001`).** `PF_PATH` and `PF_COMPLETION_MARKER` — and every
 operational file reference the pipeline records — hold a **storage reference (backend + root +

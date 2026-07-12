@@ -10,14 +10,20 @@ import (
 // Mem is an in-memory Store used for tests and for running the GUI/preview
 // without a database. It is not used in production.
 type Mem struct {
-	mu       sync.Mutex
-	seq      int64
-	fileUID  int64
-	pipes    map[int64]Pipeline
-	files    []ProcessedFile
-	users    map[string]User
-	sessions map[string]memSession
-	clock    func() time.Time
+	mu          sync.Mutex
+	seq         int64
+	fileUID     int64
+	pipes       map[int64]Pipeline
+	datasources map[int64]Datasource
+	files       []ProcessedFile
+	users       map[string]User
+	sessions    map[string]memSession
+	clock       func() time.Time
+
+	// Output consolidation (see mem_batch.go).
+	batches    map[int64]*memBatch
+	deliveries []*memDelivery
+	dsSeq      map[int64]int64 // per-destination gapless sequence
 }
 
 type memSession struct {
@@ -28,7 +34,7 @@ type memSession struct {
 
 // NewMem creates an empty in-memory store.
 func NewMem() *Mem {
-	return &Mem{pipes: map[int64]Pipeline{}, users: map[string]User{}, sessions: map[string]memSession{}, clock: time.Now}
+	return &Mem{pipes: map[int64]Pipeline{}, datasources: map[int64]Datasource{}, users: map[string]User{}, sessions: map[string]memSession{}, clock: time.Now}
 }
 
 func (m *Mem) ListPipelines(_ context.Context) ([]Pipeline, error) {
@@ -36,6 +42,7 @@ func (m *Mem) ListPipelines(_ context.Context) ([]Pipeline, error) {
 	defer m.mu.Unlock()
 	out := make([]Pipeline, 0, len(m.pipes))
 	for _, p := range m.pipes {
+		m.resolveDatasourcesLocked(&p)
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -49,7 +56,74 @@ func (m *Mem) GetPipeline(_ context.Context, id int64) (Pipeline, error) {
 	if !ok {
 		return Pipeline{}, ErrNotFound
 	}
+	m.resolveDatasourcesLocked(&p)
 	return p, nil
+}
+
+// resolveDatasourcesLocked materializes datasource references into a copy of the
+// pipeline (caller must hold m.mu; p is a value copy so the stored pipeline keeps
+// its raw references).
+func (m *Mem) resolveDatasourcesLocked(p *Pipeline) {
+	if p.Source.DatasourceID == 0 && p.Source.OutputDatasourceID == 0 {
+		return
+	}
+	var inDS, outDS *Datasource
+	if d, ok := m.datasources[p.Source.DatasourceID]; ok {
+		inDS = &d
+	}
+	if p.Source.OutputDatasourceID != 0 && p.Source.OutputDatasourceID != p.Source.DatasourceID {
+		if d, ok := m.datasources[p.Source.OutputDatasourceID]; ok {
+			outDS = &d
+		}
+	}
+	applyDatasources(p, inDS, outDS)
+}
+
+// --- datasources (in-memory) ---
+
+func (m *Mem) CreateDatasource(_ context.Context, d Datasource) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, existing := range m.datasources {
+		if existing.Name == d.Name {
+			return 0, ErrDuplicate
+		}
+	}
+	m.seq++
+	d.ID = m.seq
+	if d.CreatedOn.IsZero() {
+		d.CreatedOn = m.clock()
+	}
+	m.datasources[d.ID] = d
+	return d.ID, nil
+}
+
+func (m *Mem) ListDatasources(_ context.Context) ([]Datasource, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Datasource, 0, len(m.datasources))
+	for _, d := range m.datasources {
+		out = append(out, d)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (m *Mem) GetDatasource(_ context.Context, id int64) (Datasource, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.datasources[id]
+	if !ok {
+		return Datasource{}, ErrNotFound
+	}
+	return d, nil
+}
+
+func (m *Mem) DeleteDatasource(_ context.Context, id int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.datasources, id)
+	return nil
 }
 
 func (m *Mem) CreatePipeline(_ context.Context, p Pipeline) (int64, error) {
@@ -105,6 +179,62 @@ func (m *Mem) ListProcessedFiles(_ context.Context, limit int) ([]ProcessedFile,
 	return out, nil
 }
 
+// ListSFTPSourcePipelines returns the in-memory pipelines whose source backend is
+// "sftp".
+func (m *Mem) ListSFTPSourcePipelines(_ context.Context) ([]Pipeline, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Pipeline
+	for _, p := range m.pipes {
+		if p.Source.Backend == "sftp" {
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+// ListArchivablePF returns recorded files for a pipeline older than olderThan.
+func (m *Mem) ListArchivablePF(_ context.Context, pipelineID int64, olderThan time.Time, includeQuarantined bool) ([]ArchivablePF, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []ArchivablePF
+	for _, f := range m.files {
+		if f.PipelineID != pipelineID {
+			continue
+		}
+		if f.Status != "DONE" && !(includeQuarantined && f.Status == "QUARANTINED") {
+			continue
+		}
+		if !f.CollectedOn.Before(olderThan) {
+			continue
+		}
+		out = append(out, ArchivablePF{
+			PFUID: f.FileUID, FileUID: f.FileUID, Name: f.Name, OutputName: f.OutputName,
+			Size: f.Size, Status: f.Status, CompletedOn: f.CollectedOn,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CompletedOn.Before(out[j].CompletedOn) })
+	return out, nil
+}
+
+// MarkArchived flips the referenced files to ARCHIVED and returns a synthetic run id.
+func (m *Mem) MarkArchived(_ context.Context, _ int64, run ArchiveRun) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	want := make(map[int64]bool, len(run.PFUIDs))
+	for _, id := range run.PFUIDs {
+		want[id] = true
+	}
+	for i := range m.files {
+		if want[m.files[i].FileUID] {
+			m.files[i].Status = "ARCHIVED"
+		}
+	}
+	m.seq++
+	return m.seq, nil
+}
+
 func (m *Mem) Ping(_ context.Context) error { return nil }
 func (m *Mem) Close()                        {}
 
@@ -149,11 +279,16 @@ func (m *Mem) CompleteClaimed(ctx context.Context, pf ProcessedFile, _ Claim) (b
 	return true, nil
 }
 
-func (m *Mem) QuarantineFile(_ context.Context, _, _ int64, name string, _ int64, _ Claim) (bool, error) {
+func (m *Mem) QuarantineFile(_ context.Context, _, _ int64, name string, _ int64, reason string, _ Claim) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.fileUID++
-	m.files = append(m.files, ProcessedFile{FileUID: m.fileUID, Name: name, Status: "QUARANTINED", CollectedOn: m.clock()})
+	code, text := splitReason(reason)
+	r := text
+	if r == "" {
+		r = code
+	}
+	m.files = append(m.files, ProcessedFile{FileUID: m.fileUID, Name: name, Status: "QUARANTINED", Reason: r, CollectedOn: m.clock()})
 	return true, nil
 }
 

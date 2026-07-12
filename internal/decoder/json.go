@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
@@ -14,10 +15,11 @@ import (
 
 type jsonDecoder struct {
 	array bool // array/object document vs newline-delimited
+	types map[string]spec.ValueType
 }
 
-func newJSON(s spec.JSONSpec) *jsonDecoder {
-	return &jsonDecoder{array: s.Mode == "array"}
+func newJSON(s spec.JSONSpec, fields []spec.FieldSpec) *jsonDecoder {
+	return &jsonDecoder{array: s.Mode == "array", types: typeMap(fields)}
 }
 
 func (d *jsonDecoder) Decode(ctx context.Context, r io.Reader, emit EmitFunc) error {
@@ -27,21 +29,26 @@ func (d *jsonDecoder) Decode(ctx context.Context, r io.Reader, emit EmitFunc) er
 	return d.decodeNDJSON(ctx, r, emit)
 }
 
-// decodeNDJSON reads one JSON object per line (BR-DEC-002).
+// decodeNDJSON reads one JSON object per line (BR-DEC-002) through the fast
+// flat-object parser: the only steady-state allocation per record is the line
+// string, which keys and values are sliced from. One record is reused across
+// lines — the pipeline consumes each record synchronously before the next
+// (same contract as the DSV decoder).
 func (d *jsonDecoder) decodeNDJSON(ctx context.Context, r io.Reader, emit EmitFunc) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	rec := &canonical.Record{}
 	seq := 0
 	for sc.Scan() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 {
+		b := bytes.TrimSpace(sc.Bytes())
+		if len(b) == 0 {
 			continue
 		}
-		rec, err := objectToRecord(line, seq+1)
-		if err != nil {
+		line := string(b)
+		if err := parseJSONObject(line, seq+1, d.types, rec); err != nil {
 			return fmt.Errorf("json: line %d: %w", seq+1, err)
 		}
 		if err := emit(rec); err != nil {
@@ -53,64 +60,53 @@ func (d *jsonDecoder) decodeNDJSON(ctx context.Context, r io.Reader, emit EmitFu
 }
 
 // decodeArray streams the elements of a top-level JSON array (BR-DEC-002),
-// record-at-a-time so the whole document is not buffered as objects.
+// record-at-a-time: each element is captured as a RawMessage (whose buffer the
+// stdlib reuses across iterations) and parsed with the fast flat-object parser.
 func (d *jsonDecoder) decodeArray(ctx context.Context, r io.Reader, emit EmitFunc) error {
 	dec := json.NewDecoder(r)
-	dec.UseNumber()
 	tok, err := dec.Token()
+	if errors.Is(err, io.EOF) {
+		// An empty stream carries zero records, exactly as ndjson mode treats it. An
+		// empty member must not condemn the archive that contains it (BR-COL-016).
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("json: read opening token: %w", err)
 	}
 	if delim, ok := tok.(json.Delim); !ok || delim != '[' {
 		return fmt.Errorf("json: array mode expects a top-level '[', got %v", tok)
 	}
+	var raw json.RawMessage
+	rec := &canonical.Record{}
 	seq := 0
 	for dec.More() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		var obj map[string]any
-		if err := dec.Decode(&obj); err != nil {
+		raw = raw[:0]
+		if err := dec.Decode(&raw); err != nil {
 			return fmt.Errorf("json: element %d: %w", seq+1, err)
 		}
-		if err := emit(mapToRecord(obj, seq+1)); err != nil {
+		// Copy to a string: parseJSONObject slices values out of its input, and
+		// raw's backing array is reused by the next Decode.
+		if err := parseJSONObject(string(raw), seq+1, d.types, rec); err != nil {
+			return fmt.Errorf("json: element %d: %w", seq+1, err)
+		}
+		if err := emit(rec); err != nil {
 			return err
 		}
 		seq++
 	}
+	// Consume the closing ']' and require EOF — trailing garbage (or a second
+	// document) is an error, consistent with the NDJSON path's strictness, not
+	// silently dropped.
+	if tok, err := dec.Token(); err != nil {
+		return fmt.Errorf("json: closing ']': %w", err)
+	} else if delim, ok := tok.(json.Delim); !ok || delim != ']' {
+		return fmt.Errorf("json: expected closing ']', got %v", tok)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("json: trailing data after array")
+	}
 	return nil
-}
-
-func objectToRecord(b []byte, seq int) (*canonical.Record, error) {
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.UseNumber()
-	var obj map[string]any
-	if err := dec.Decode(&obj); err != nil {
-		return nil, err
-	}
-	return mapToRecord(obj, seq), nil
-}
-
-func mapToRecord(obj map[string]any, seq int) *canonical.Record {
-	// Preserve key order deterministically via json ordering isn't available from
-	// a map; sort for stable output. The transform stage defines the real order.
-	rec := &canonical.Record{Seq: seq, Fields: make([]canonical.Field, 0, len(obj))}
-	for _, k := range sortedKeys(obj) {
-		rec.Set(k, canonical.FromJSON(obj[k]))
-	}
-	return rec
-}
-
-func sortedKeys(m map[string]any) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	// simple insertion sort keeps deps minimal
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && keys[j-1] > keys[j]; j-- {
-			keys[j-1], keys[j] = keys[j], keys[j-1]
-		}
-	}
-	return keys
 }

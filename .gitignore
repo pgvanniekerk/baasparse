@@ -10,3 +10,6 @@
 
 # Runtime working directories (input/in-progress/done/output)
 /data/
+
+# Local deployment secrets (AES key, cluster creds) — never commit.
+deploy/local/values.local.yaml

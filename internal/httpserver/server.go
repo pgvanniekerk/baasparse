@@ -84,6 +84,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /pipelines/{id}/run", s.handlePipelineRun)
 	mux.HandleFunc("POST /pipelines/{id}/toggle", s.handlePipelineToggle)
 	mux.HandleFunc("POST /preview", s.handlePreview)
+
+	// Datasources (reusable storage connections)
+	mux.HandleFunc("GET /datasources", s.handleDatasourceList)
+	mux.HandleFunc("GET /datasources/new", s.handleDatasourceNew)
+	mux.HandleFunc("POST /datasources", s.handleDatasourceCreate)
+	mux.HandleFunc("POST /datasources/{id}/delete", s.handleDatasourceDelete)
+	mux.HandleFunc("POST /datasources/test", s.handleDatasourceTest)
+
 	mux.HandleFunc("GET /files", s.handleFiles)
 	mux.HandleFunc("GET /architecture", s.handleArchitecture)
 

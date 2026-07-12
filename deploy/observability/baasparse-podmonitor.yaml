@@ -1,0 +1,30 @@
+# Makes the microk8s observability addon's Prometheus scrape each baasparse pod's
+# /metrics endpoint (the app's OTel Prometheus exporter), so baasparse_* metrics
+# — file_processing_seconds (histogram), files_processed_total, records_in/out/
+# suspended_total — land in Prometheus and are graphable in Grafana.
+#
+# NOTE on the `release` label: kube-prometheus-stack's Prometheus only selects
+# PodMonitors whose labels match its podMonitorSelector, which defaults to
+# `release: <helm-release-name>`. Confirm the release name after enabling the
+# addon and set it below:
+#   microk8s kubectl -n observability get prometheus -o jsonpath='{.items[0].spec.podMonitorSelector}'; echo
+#   microk8s kubectl -n observability get prometheus -o jsonpath='{.items[0].metadata.labels}'; echo
+# then apply:  microk8s kubectl apply -f deploy/observability/baasparse-podmonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: baasparse
+  namespace: baasparse
+  labels:
+    release: kube-prom-stack   # <-- set to the addon's kube-prometheus-stack release name
+spec:
+  namespaceSelector:
+    matchNames: [baasparse]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: baasparse
+      app.kubernetes.io/component: server
+  podMetricsEndpoints:
+    - port: http          # containerPort 8080 is named "http" in the Deployment
+      path: /metrics
+      interval: 5s         # tight interval so per-second rates (records/sec) react quickly

@@ -34,6 +34,12 @@ func New(fs spec.FormatSpec) (Encoder, error) {
 			s = *fs.JSON
 		}
 		return newJSON(s), nil
+	case spec.FormatXML:
+		s := spec.XMLSpec{}
+		if fs.XML != nil {
+			s = *fs.XML
+		}
+		return newXMLEnc(s), nil
 	default:
 		return nil, fmt.Errorf("encoder: unsupported format kind %q", fs.Kind)
 	}

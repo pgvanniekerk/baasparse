@@ -53,7 +53,8 @@ func (s *Server) handlePipelineList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePipelineNew(w http.ResponseWriter, r *http.Request) {
-	s.render(w, "pipeline_new", s.page(r, "pipelines", nil))
+	dss, _ := s.store.ListDatasources(r.Context())
+	s.render(w, "pipeline_new", s.page(r, "pipelines", map[string]any{"Datasources": dss}))
 }
 
 func (s *Server) handlePipelineCreate(w http.ResponseWriter, r *http.Request) {
@@ -61,23 +62,61 @@ func (s *Server) handlePipelineCreate(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	src := parseSource(r)
 	p := store.Pipeline{
 		Name:      r.FormValue("name"),
 		Enabled:   r.FormValue("enabled") == "on",
-		InputDir:  r.FormValue("input_dir"),
-		OutputDir: r.FormValue("output_dir"),
+		InputDir:  src.InputDir,
+		OutputDir: src.OutputDir,
 		Input:     parseFormatSpec(r, "input"),
 		Output:    parseFormatSpec(r, "output"),
 		Transform: parseTransform(r),
+		Source:    src,
+		Archive:   parseArchive(r),
 		CreatedBy: "operator",
 	}
 	if p.Name == "" {
 		p.Name = "pipeline-" + time.Now().Format("150405")
 	}
+	// Catch a bad member glob here rather than at 3am: an unparseable pattern is
+	// only discovered when files arrive, and it quarantines every one of them.
+	if err := validateFormatSpec(p.Input); err != nil {
+		s.badRequest(w, err)
+		return
+	}
+	// Destinations (TS 07 §7.2) and consolidation (§7.3.2). Each destination carries
+	// its OWN output structure, so the pipeline-level transform is just the fallback
+	// the preview and upload paths use.
+	outs, oerr := parseOutputs(r)
+	if oerr != nil {
+		s.badRequest(w, oerr)
+		return
+	}
+	p.Outputs = outs
+	p.Batch = parseBatch(r)
+	if len(p.Outputs) > 0 {
+		p.Output = p.Outputs[0].Format
+		if p.Outputs[0].Transform != nil {
+			p.Transform = *p.Outputs[0].Transform
+		}
+		if err := store.ValidateOutputs(p.Outputs); err != nil {
+			s.badRequest(w, err)
+			return
+		}
+	} else if hasDestinationRows(r) {
+		s.badRequest(w, fmt.Errorf("every output destination needs a name"))
+		return
+	}
 	id, err := s.store.CreatePipeline(r.Context(), p)
 	if err != nil {
 		s.fail(w, err)
 		return
+	}
+	// Pre-create the lifecycle directory tree for a filesystem-backed pipeline so
+	// the operator can drop files immediately (re-reads the pipeline so datasource
+	// references are materialized into concrete dirs first).
+	if created, gerr := s.store.GetPipeline(r.Context(), id); gerr == nil {
+		s.provisionDirs(r.Context(), created)
 	}
 	http.Redirect(w, r, fmt.Sprintf("/pipelines/%d", id), http.StatusSeeOther)
 }
@@ -104,9 +143,11 @@ func (s *Server) handlePipelineDetail(w http.ResponseWriter, r *http.Request) {
 			mine = append(mine, f)
 		}
 	}
+	dels, _ := s.store.ListDeliveries(r.Context(), id, 25)
 	s.render(w, "pipeline_detail", s.page(r, "pipelines", map[string]any{
-		"Pipeline": p,
-		"Files":    mine,
+		"Pipeline":   p,
+		"Files":      mine,
+		"Deliveries": dels,
 	}))
 }
 
@@ -160,7 +201,7 @@ func (s *Server) handlePipelineRun(w http.ResponseWriter, r *http.Request) {
 	if outPrefix == "" {
 		outPrefix = s.outputPrefix
 	}
-	pf, err := s.runner.ProcessFile(r.Context(), p, s.storage, srcKey, outPrefix, s.donePrefix, nil)
+	pf, err := s.runner.ProcessFile(r.Context(), p, s.storage, s.storage, srcKey, outPrefix, s.donePrefix, nil)
 	if errors.Is(err, store.ErrDuplicate) {
 		s.renderFragment(w, "run_result", map[string]any{"Error": "A file with this name was already processed by this pipeline (re-arrival). Rename it or use replay."})
 		return
@@ -185,16 +226,30 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	sp := pipeline.Spec{
-		Input:     parseFormatSpec(r, "input"),
-		Transform: parseTransform(r),
-		Output:    parseFormatSpec(r, "output"),
+	// Preview one DESTINATION, because shape now lives on the destination: which
+	// fields it carries, in what format. The wizard posts the destination being
+	// previewed; with none, fall back to the legacy single-output form fields.
+	sp := pipeline.Spec{Input: parseFormatSpec(r, "input")}
+	outs, oerr := parseOutputs(r)
+	if oerr != nil {
+		s.renderFragment(w, "preview_result", map[string]any{"Error": oerr.Error()})
+		return
+	}
+	if len(outs) > 0 {
+		o := outs[0]
+		sp.Output = o.Format
+		if o.Transform != nil {
+			sp.Transform = *o.Transform
+		}
+	} else {
+		sp.Transform = parseTransform(r)
+		sp.Output = parseFormatSpec(r, "output")
 	}
 	sample := []byte(r.FormValue("sample"))
 	res := s.runner.Preview(r.Context(), sp, sample)
 	s.renderFragment(w, "preview_result", map[string]any{
-		"Result": res,
-		"InKind": sp.Input.Kind,
+		"Result":  res,
+		"InKind":  sp.Input.Kind,
 		"OutKind": sp.Output.Kind,
 	})
 }
@@ -251,6 +306,12 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) fail(w http.ResponseWriter, err error) {
 	s.log.Error("handler error", "err", err)
 	http.Error(w, err.Error(), http.StatusInternalServerError)
+}
+
+// badRequest reports invalid operator input — the fault is in the submitted form,
+// not in the server, so it must not read as a 500 to the operator or to alerting.
+func (s *Server) badRequest(w http.ResponseWriter, err error) {
+	http.Error(w, err.Error(), http.StatusBadRequest)
 }
 
 func (s *Server) renderFragment(w http.ResponseWriter, name string, data any) {

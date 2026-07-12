@@ -121,6 +121,34 @@ itself** (§12.5–§12.7) — the metrics additionally let external monitoring 
 alert independently, per `BR-OPS-008`'s "visibility never depends on one channel"
 principle.
 
+### Alpha metrics — as emitted (as-built)
+
+The alpha data plane emits a focused subset of the catalog above through the app's
+**OTel Prometheus exporter** (`go.opentelemetry.io/otel/exporters/prometheus`, served at
+`GET /metrics`; `internal/telemetry`), every series labelled by `pipeline` — the scraper
+adds `pod`/`instance` (§12.14). These are the concrete, currently-emitted metrics:
+
+| Metric | Type | Labels | Emitted by | Meaning |
+|---|---|---|---|---|
+| `baasparse_files_processed_total` | counter | `pipeline` | runner (`ProcessFile`, `internal/runner/runner.go`) | Files completed `DONE` — the concrete `baasparse_files_total{outcome=completed}` series |
+| `baasparse_files_quarantined_total` | counter | `pipeline,reason_code` | watcher (`quarantine`, `internal/watcher/watcher.go`) | Files quarantined on a content/poison failure (`BR-COL-017`) — the concrete `baasparse_files_total{outcome=quarantined}` series, split by machine reason code |
+| `baasparse_records_in_total` | counter | `pipeline` | runner | Records decoded (`baasparse_records_total{outcome=passed}` inflow) |
+| `baasparse_records_out_total` | counter | `pipeline` | runner | Records distributed |
+| `baasparse_records_suspended_total` | counter | `pipeline` | runner | Records suspended (`baasparse_records_total{outcome=suspended}`) |
+| `baasparse_file_processing_seconds` | histogram | `pipeline` | runner | Claim→done per-file processing time — the concrete `baasparse_file_processing_duration_seconds` |
+
+`baasparse_files_quarantined_total{pipeline,reason_code}` is **new** in the alpha: a
+genuine decode/content failure now quarantines the file **immediately** (rather than only
+a stall heuristic doing so) and increments this counter as it records the `QUARANTINED`
+file state. `reason_code` is the **leading `UPPER_SNAKE` code** parsed from the quarantine
+reason (`DECODE_ERROR` from a decode/content failure, `STALLED` from a poison-stall
+takeover, default `PROCESSING_ERROR`) — deliberately **low-cardinality**; the full reason
+text stays in the log line, in the `PF_REASON_CODE`/`PF_ERROR_TEXT` columns and on the GUI
+Processed-files page, never in the metric label. Retryable infrastructure failures (a
+destination write outage surfacing as an encoder error, context cancellation on shutdown)
+are **not** quarantined and do not increment it. This counter feeds the `POISON_QUARANTINE`
+alarm (§12.5) and the success-ratio panel (§12.14).
+
 ## 12.3 Health endpoints
 
 `BR-OPS-009`. Served per instance on the management listener (and answered without
@@ -567,3 +595,43 @@ P --> AM : alert rules (alarm-count metric)
 - **Grafana dashboards** ship as ConfigMaps: per-pipeline throughput, reconciliation (in vs
   out vs suspended vs open), backlog/latency, disk/object-store pressure, replication lag,
   cluster/instance health (TS 16 §16.8).
+
+### As deployed — the microk8s observability addon (alpha)
+
+`BR-OPS-005/008/009`, `BR-NFR-040/041`. The alpha runs the model above concretely on the
+**microk8s `observability` addon** — `kube-prometheus-stack` (**Prometheus + Grafana +
+Alertmanager**) plus **Loki + Promtail** — alongside a **Tempo** deployment and the Helm
+chart's **bundled OTel Collector**. Wiring lives under `deploy/observability/` and the chart
+(`deploy/helm/baasparse/`). This is the on-the-ground instance of the §12.14 emission/routing
+pivot: emission is unchanged and every metric and correlation id is preserved.
+
+- **Metrics — Prometheus scrape via a `PodMonitor`.** Each server pod exposes the OTel
+  Prometheus exporter at `/metrics` (containerPort 8080, named `http`). A **`PodMonitor`**
+  (`deploy/observability/baasparse-podmonitor.yaml`, `interval: 15s`) selects the pods so the
+  addon's Prometheus scrapes them; its `release` label must match the stack's
+  `podMonitorSelector`. This is the concrete realisation of the "ServiceMonitor scrape" seam
+  (§12.2/§12.14) — a **`PodMonitor`**, since the data-plane pods are scraped directly rather
+  than through a Service — and Prometheus adds the per-pod `pod`/`instance` labels (§12.2).
+- **Grafana dashboards.** A **"baasparse — pipeline overview"** dashboard (imported by
+  `deploy/observability/import-dashboard.py`, uid `baasparse-overview`) carries the panels of
+  §12.14: files-processed / files-quarantined / records-in stat tiles, a success ratio,
+  processing-time p50/p95 per pipeline, files/sec throughput, records in/out/suspended, and
+  quarantines/sec by `reason_code`. The PromQL/LogQL behind the panels is in
+  `deploy/observability/QUERIES.md`.
+- **Logs — Loki via Promtail.** The app logs **JSON to stdout** (§12.10); the addon's
+  **Promtail** agent collects every pod's stdout into **Loki**, viewed in Grafana Explore
+  (`{namespace="baasparse"}`). Each line carries `trace_id` and `correlationID` (the file
+  UID, §12.10), so a log query pivots to the file's trace. No app change and no in-app log
+  viewer (§12.10). Metrics and logs therefore reach their backends by **scrape and Promtail**,
+  not through the collector.
+- **Traces — OTLP → bundled OTel Collector → Tempo.** The app exports spans over **OTLP**
+  (`OTEL_EXPORTER_OTLP_ENDPOINT`, defaulting to the chart's bundled collector Service,
+  `…-otel-collector:4318`); the **bundled OTel Collector** (`opentelemetry-collector-contrib`,
+  OTLP receivers on `4318`/`4317`) routes the **traces** signal to **Tempo**
+  (`otelCollector.tempoEndpoint`), viewable in Grafana. Spans cover
+  decode → transform → encode and carry the `file_uid` and pipeline as attributes. Tracing is
+  a cheap no-op when no OTLP endpoint is configured, so the engine runs fine without a
+  collector present.
+- **Alerting — Alertmanager.** The addon's **Alertmanager** owns notification routing over
+  Prometheus alert rules on the scraped metrics, per the delegation in §12.5 — the `AL_ALARM`
+  lifecycle remains the system-of-record.

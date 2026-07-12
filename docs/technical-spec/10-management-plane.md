@@ -389,6 +389,8 @@ banners) use `hx-trigger="every Ns"` against fragment endpoints; no WebSocket de
 | API tokens | `/admin/tokens` | `tokens.*` | issue (one-time display), rotate, revoke |
 | Sources & pipelines | `/config/pipelines` | `config.view` | list with mode (`PLV_MODE`), active version, lock state |
 | Pipeline editor | `/config/pipelines/{key}` | `config.edit` | stage graph editing on the open draft, under edit lock |
+| Datasources | `/datasources` | `config.view` | reusable storage connections (posix/S3): list, create, remove (soft-delete) — §10.5.7 |
+| Datasource setup | `/datasources/new` | `config.edit` | connection form + inline "Test connection" probe (§10.5.7) |
 | File-structure modeller | `/config/formats/{key}` | `config.edit` | per format kind, §10.5.3 (`BR-UI-004`) |
 | Transformation modeller | `/config/transforms/{key}` | `config.edit` | projection/rename/convert/derive/output builder (`BR-UI-005`) |
 | Destinations | `/config/destinations/{key}` | `config.edit` | incl. RDBMS mapping + "validate mapping" action (`BR-DST-014`) |
@@ -459,6 +461,84 @@ without reload.
 Every GUI route (except `/login` and static assets) sits behind the session middleware;
 every state-changing action passes CSRF (§10.3.1) and lands in the service layer, which
 writes the corresponding audit event (§10.6) attributed to the session's user.
+
+### 10.5.7 Datasources — reusable storage connections and the wizard picker
+
+A **datasource** is a reusable, named storage *connection* that many pipelines
+share — a POSIX working directory (a `Root`) or an S3/MinIO endpoint + region +
+credentials. It deliberately holds **only the connection, never per-pipeline
+specifics**: the S3 bucket and the input / in-progress / done / quarantine /
+output lifecycle areas are chosen when a pipeline is created, so one datasource
+can host many pipelines without collision. Datasources persist in a dedicated
+`DSR_DATASOURCE` table — an identity row (`DSR_UID`, `DSR_NAME`,
+`DSR_KIND ∈ {posix,s3}`, `DSR_STATUS ∈ {ACTIVE,DISABLED}`, audit columns) plus a
+`DSR_CONFIG` JSONB blob whose S3 secret key is **AES-GCM encrypted via the
+`secret` module, the same at-rest pattern as the `SRC`/`PLV` JSONB**
+(`BR-NFR-054`). A partial-unique index `UX_DSR_NAME_ACTIVE` enforces name
+uniqueness among *live* datasources; removal is a **soft-delete**
+(`DSR_STATUS = 'DISABLED'`) so any pipeline still referencing the datasource by id
+keeps resolving (config is data — never destroyed).
+
+**CRUD surface (GUI form routes).** Like the rest of the HTMX GUI these are
+server-rendered pages and form posts (no `/api/v1` binding in the alpha; a future
+`/api/v1/datasources` resource slots into the §10.4.2 map). They sit behind the
+session middleware and, by design, the config permissions of §10.2.1:
+
+| Route | Purpose |
+|-------|---------|
+| `GET /datasources` | List page: name, kind, connection summary, created-on, Remove |
+| `GET /datasources/new` | Connection setup form (kind toggle → posix `Root` or S3 endpoint/region/keys) |
+| `POST /datasources` | Create — the store encrypts the secret before persisting; duplicate active name → inline error |
+| `POST /datasources/{id}/delete` | Soft-delete (sets `DISABLED`; referencing pipelines unaffected) |
+| `POST /datasources/test` | **Test connection** — probes the config and swaps back an inline pass/fail fragment |
+
+**Test connection (`POST /datasources/test`).** The button posts the same-named
+connection fields and runs `storage.TestConnection` (12 s timeout), rendering an
+HTMX `test_result` fragment (`✓ connected` / `⚠ <reason>`) in place — no page
+reload, no CDN (`BR-UI-001`). The probe is backend-aware and exercises the *same
+code paths the data plane uses*, so a green result means real pipelines will work:
+
+- **posix** — a full round-trip under `Root`: `List` (read access) then write →
+  read-back → byte-verify → delete a throwaway object, proving mkdir + atomic
+  write + read + delete.
+- **s3 with a bucket** — the identical round-trip inside that bucket (an optional
+  "bucket to test" field on the form).
+- **s3 without a bucket** — a connection-only datasource, where the bucket is
+  chosen per-pipeline: the endpoint + credentials are validated with a
+  `ListBuckets` reachability call, and the fragment says so ("endpoint and
+  credentials verified (bucket is set per-pipeline)").
+
+The probe object lives under a dot-prefixed `.baasparse-probe/` key so it stays
+invisible to any List-based detection even if the cleanup delete fails. Because
+the handler reads the same field names as the setup form, the check works both on
+the datasource form and inline in the wizard.
+
+**Datasource picker in the pipeline-creation wizard (`BR-UI-003`).** Step 1 of the
+wizard offers a datasource `select` for the input location; the default
+`— Configure inline below —` option keeps the **legacy inline path**
+(`DatasourceID == 0`) verbatim, so pre-datasource pipelines remain fully
+backward-compatible. When a datasource is picked the wizard reveals:
+
+- a **per-pipeline S3 bucket** (`ds_bucket`) + optional "create if missing" —
+  required because the datasource itself carries no bucket;
+- an optional **distinct output datasource** (`output_datasource_id`, default
+  `— Same as input —`) with its own per-pipeline **output bucket**
+  (`ds_output_bucket`, defaulting to the input bucket). A different "write to"
+  datasource makes the pipeline **cross-backend** — read input from one place and
+  land done/output on another (e.g. read S3 → write local FS).
+
+These references are stored **inside the `PLV_STAGE_GRAPH` JSONB document**
+(`Source.DatasourceID`, `Source.OutputDatasourceID`, `Source.OutputBucket`) — no
+new columns and no FK into `DSR_DATASOURCE` — and are **materialized at read time**
+(`applyDatasources`): the input datasource supplies backend/root/credentials for
+input + in-progress + quarantine; the output datasource becomes the pipeline's
+output/done destination; and the lifecycle areas default to a
+`<slug(name)>-<id>/{input,in-progress,done,quarantine,output}` prefix (the
+pipeline id guarantees uniqueness even when two names slug alike). On create, a
+filesystem-backed pipeline additionally has this directory tree
+**pre-provisioned** (`storage.EnsureTree`, writing a dot-prefixed `.keep` marker)
+so an operator can drop files immediately; object-store backends have virtual
+prefixes and are skipped.
 
 ## 10.6 Security-relevant audit events (`BR-USR-006`)
 
@@ -543,7 +623,7 @@ Within the single Modulith process ([[01-architecture]] §1.2):
 | BR-API-008 (optional rate limiting) | §10.4.5 |
 | BR-UI-001 (HTMX GUI served by the Go app, embedded assets) | §10.5.1 |
 | BR-UI-002 (user management) | §10.5.2 |
-| BR-UI-003 (pipelines/streams setup) | §10.5.2 pipeline editor + destinations |
+| BR-UI-003 (pipelines/streams setup) | §10.5.2 pipeline editor + destinations; §10.5.7 datasource picker |
 | BR-UI-003b (publish button, confirmation, audit) | §10.5.5 |
 | BR-UI-004 (file-structure modelling, all five kinds) | §10.5.3 |
 | BR-UI-005 (transformation modelling) | §10.5.2 transformation modeller |

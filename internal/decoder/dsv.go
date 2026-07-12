@@ -15,9 +15,10 @@ type dsvDecoder struct {
 	comma   rune
 	header  bool
 	columns []string
+	types   map[string]spec.ValueType
 }
 
-func newDSV(s spec.DSVSpec) (*dsvDecoder, error) {
+func newDSV(s spec.DSVSpec, fields []spec.FieldSpec) (*dsvDecoder, error) {
 	comma := ','
 	if s.Delimiter != "" {
 		r := []rune(s.Delimiter)
@@ -26,7 +27,18 @@ func newDSV(s spec.DSVSpec) (*dsvDecoder, error) {
 		}
 		comma = r[0]
 	}
-	return &dsvDecoder{comma: comma, header: s.HasHeader, columns: s.Columns}, nil
+	d := &dsvDecoder{comma: comma, header: s.HasHeader, columns: s.Columns}
+	// Declared input fields are authoritative: their names are the columns (in
+	// order) and their types coerce each cell — regardless of a header row, which
+	// is then skipped rather than used for names.
+	if len(fields) > 0 {
+		d.columns = make([]string, len(fields))
+		for i, f := range fields {
+			d.columns[i] = f.Name
+		}
+		d.types = typeMap(fields)
+	}
+	return d, nil
 }
 
 func (d *dsvDecoder) Decode(ctx context.Context, r io.Reader, emit EmitFunc) error {
@@ -36,11 +48,15 @@ func (d *dsvDecoder) Decode(ctx context.Context, r io.Reader, emit EmitFunc) err
 	cr.LazyQuotes = true
 	cr.ReuseRecord = true
 
-	var names []string
-	if !d.header {
-		names = d.columns
-	}
+	names := d.columns // declared/explicit column names (nil ⇒ take from header/colN)
+	headerPending := d.header
 	seq := 0
+	// One record reused across rows: the pipeline consumes (transforms + encodes)
+	// each record synchronously before the next Read, so resetting and refilling it
+	// is safe and avoids a per-row Record + Fields-slice allocation. Fields are
+	// appended directly (columns are unique by construction), skipping Set's dedup
+	// scan (which was O(fields²) per record).
+	rec := &canonical.Record{}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -52,14 +68,22 @@ func (d *dsvDecoder) Decode(ctx context.Context, r io.Reader, emit EmitFunc) err
 		if err != nil {
 			return fmt.Errorf("dsv: read row %d: %w", seq+1, err)
 		}
-		if d.header && names == nil {
-			names = append(names[:0:0], row...) // copy: ReuseRecord reuses the slice
-			continue
+		if headerPending {
+			headerPending = false
+			if len(names) == 0 { // no declared names: fall back to the header row
+				names = append(names[:0:0], row...) // copy: ReuseRecord reuses the slice
+			}
+			continue // the header row is never emitted as data
 		}
-		rec := &canonical.Record{Seq: seq + 1, Fields: make([]canonical.Field, 0, len(row))}
+		rec.Seq = seq + 1
+		rec.Fields = rec.Fields[:0]
 		for i, cell := range row {
 			name := columnName(names, i)
-			rec.Set(name, canonical.StringVal(cell))
+			v := canonical.StringVal(cell)
+			if d.types != nil {
+				v = coerceValue(v, d.types[name])
+			}
+			rec.Fields = append(rec.Fields, canonical.Field{Name: name, Val: v})
 		}
 		if err := emit(rec); err != nil {
 			return err

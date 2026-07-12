@@ -1249,6 +1249,72 @@ CREATE TABLE IF NOT EXISTS DC_DELIVERY_CONTRIBUTION (
 );
 CREATE INDEX IF NOT EXISTS IX_DC_PF ON DC_DELIVERY_CONTRIBUTION (DC_PF_UID);
 
+-- 3.5.21b BT_BATCH / BF_BATCH_FILE — output consolidation (TS 07 §7.3.2, BR-DST-005)
+--
+-- A batch is a FROZEN set of input files that together produce ONE output object
+-- per destination. It has to be durable, and it has to be frozen, for one reason:
+-- destinations deliver INDEPENDENTLY (a Revenue Assurance outage must not stall
+-- the Billing feed). The moment one destination has published, the membership can
+-- no longer change — a retry that re-formed the batch with an extra file would
+-- re-deliver the already-published records to that destination as duplicates.
+--
+-- So: membership is pinned here at formation; each destination's delivery is
+-- tracked in its own DL_DELIVERY row keyed (DL_DS_UID, DL_OUTPUT_IDENTITY =
+-- BT_IDENTITY); a retry re-delivers ONLY to destinations without a DELIVERED row.
+-- The DL row also RESERVES the destination sequence number, so a retry reuses its
+-- number instead of burning a new one — a gap in the delivered sequence therefore
+-- means a genuinely missing output (BR-DST-011), never a failed attempt.
+--
+-- The contributing files reach DONE (PF rows + DC contributions) only when EVERY
+-- destination has delivered (BR-COL-009); until then the batch stays OPEN and its
+-- files are excluded from any new batch.
+CREATE TABLE IF NOT EXISTS BT_BATCH (
+  BT_UID         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  BT_PL_UID      BIGINT      NOT NULL,
+  BT_SRC_UID     BIGINT      NOT NULL,
+  BT_PLV_UID     BIGINT      NOT NULL,
+  BT_IDENTITY    TEXT        NOT NULL,   -- deterministic hash of the member set
+  BT_STATUS      TEXT        NOT NULL DEFAULT 'OPEN',
+  BT_FILE_COUNT  INT         NOT NULL,
+  BT_SIZE_BYTES  BIGINT      NOT NULL DEFAULT 0,
+  BT_ATTEMPTS    INT         NOT NULL DEFAULT 0,
+  BT_LAST_ERROR  TEXT        NULL,
+  BT_CREATED_BY  TEXT        NOT NULL,
+  BT_CREATED_ON  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  BT_MODIFIED_BY TEXT        NOT NULL,
+  BT_MODIFIED_ON TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT FK_BT_PL  FOREIGN KEY (BT_PL_UID)  REFERENCES PL_PIPELINE (PL_UID)          ON DELETE RESTRICT,
+  CONSTRAINT FK_BT_SRC FOREIGN KEY (BT_SRC_UID) REFERENCES SRC_SOURCE (SRC_UID)          ON DELETE RESTRICT,
+  CONSTRAINT FK_BT_PLV FOREIGN KEY (BT_PLV_UID) REFERENCES PLV_PIPELINE_VERSION (PLV_UID) ON DELETE RESTRICT,
+  CONSTRAINT CK_BT_STATUS CHECK (BT_STATUS IN ('OPEN','CLOSED','ABANDONED'))
+);
+-- One live batch per identity per source: two instances racing to form the same
+-- batch collide here, and the loser resumes the winner's batch instead.
+CREATE UNIQUE INDEX IF NOT EXISTS UX_BT_SRC_IDENTITY_OPEN ON BT_BATCH (BT_SRC_UID, BT_IDENTITY) WHERE BT_STATUS = 'OPEN';
+CREATE INDEX IF NOT EXISTS IX_BT_OPEN ON BT_BATCH (BT_SRC_UID) WHERE BT_STATUS = 'OPEN';
+
+CREATE TABLE IF NOT EXISTS BF_BATCH_FILE (
+  BF_UID         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  BF_BT_UID      BIGINT      NOT NULL,
+  BF_NAME        TEXT        NOT NULL,
+  BF_SIZE_BYTES  BIGINT      NOT NULL DEFAULT 0,
+  BF_SEQ         INT         NOT NULL,   -- position within the batch (stable order)
+  -- Per-file record counts, written once the batch has been encoded. They exist so
+  -- that a batch which crashed AFTER delivering but BEFORE committing can still
+  -- write truthful PF rows on resume (in = out + suspended, BR-REC-001) rather than
+  -- recording the files as DONE with zero records.
+  BF_RECORDS_IN  BIGINT      NOT NULL DEFAULT 0,
+  BF_RECORDS_OUT BIGINT      NOT NULL DEFAULT 0,
+  BF_SUSPENDED   BIGINT      NOT NULL DEFAULT 0,
+  BF_CREATED_ON  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT FK_BF_BT FOREIGN KEY (BF_BT_UID) REFERENCES BT_BATCH (BT_UID) ON DELETE CASCADE,
+  CONSTRAINT UX_BF_BT_NAME UNIQUE (BF_BT_UID, BF_NAME)
+);
+CREATE INDEX IF NOT EXISTS IX_BF_NAME ON BF_BATCH_FILE (BF_NAME);
+ALTER TABLE BF_BATCH_FILE ADD COLUMN IF NOT EXISTS BF_RECORDS_IN  BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE BF_BATCH_FILE ADD COLUMN IF NOT EXISTS BF_RECORDS_OUT BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE BF_BATCH_FILE ADD COLUMN IF NOT EXISTS BF_SUSPENDED   BIGINT NOT NULL DEFAULT 0;
+
 -- 3.5.22 OS_OPERATIONAL_STATE — declared operational states
 CREATE TABLE IF NOT EXISTS OS_OPERATIONAL_STATE (
   OS_UID            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -1353,6 +1419,38 @@ ON CONFLICT (UR_U_UID, UR_R_UID) DO NOTHING;
 INSERT INTO SM_SCHEMA_MIGRATION (SM_VERSION, SM_CHECKSUM, SM_STATUS, SM_CREATED_BY, SM_MODIFIED_BY)
 VALUES ('0001_initial', 'baseline', 'APPLIED', 'engine:bootstrap', 'engine:bootstrap')
 ON CONFLICT (SM_VERSION) DO NOTHING;
+
+-- =============================================================================
+-- 3.4.9  DSR_DATASOURCE — reusable storage connections (posix/s3) that pipelines
+--        select as their input and/or output location (cloud-native track).
+--        Additive to the 0001 baseline; no other table FKs into it — pipelines
+--        link it by id inside the PLV_STAGE_GRAPH JSONB document. Connection
+--        config (incl. the encrypted S3 secret key) lives in DSR_CONFIG, mirroring
+--        the SRC/PLV encrypted-JSONB pattern.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS DSR_DATASOURCE (
+  DSR_UID         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  DSR_NAME        TEXT        NOT NULL,
+  DSR_KIND        TEXT        NOT NULL,
+  DSR_CONFIG      JSONB       NOT NULL,
+  DSR_STATUS      TEXT        NOT NULL DEFAULT 'ACTIVE',
+  DSR_CREATED_BY  TEXT        NOT NULL,
+  DSR_CREATED_ON  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  DSR_MODIFIED_BY TEXT        NOT NULL,
+  DSR_MODIFIED_ON TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT CK_DSR_KIND   CHECK (DSR_KIND IN ('posix','s3')),
+  CONSTRAINT CK_DSR_STATUS CHECK (DSR_STATUS IN ('ACTIVE','DISABLED'))
+);
+-- Name is unique among ACTIVE datasources; a soft-delete sets DISABLED so any
+-- pipeline still referencing the datasource by id resolves (config is data,
+-- never destroyed — TS ground rule §6).
+CREATE UNIQUE INDEX IF NOT EXISTS UX_DSR_NAME_ACTIVE ON DSR_DATASOURCE (DSR_NAME) WHERE DSR_STATUS = 'ACTIVE';
+
+-- PF_PROCESSED_FILE: carry a reason for QUARANTINED / errored files so the GUI can
+-- show WHY a file failed. Added via idempotent ALTER because CREATE TABLE IF NOT
+-- EXISTS above does not backfill columns onto an already-provisioned table.
+ALTER TABLE PF_PROCESSED_FILE ADD COLUMN IF NOT EXISTS PF_REASON_CODE TEXT NULL;
+ALTER TABLE PF_PROCESSED_FILE ADD COLUMN IF NOT EXISTS PF_ERROR_TEXT  TEXT NULL;
 
 -- =============================================================================
 -- End of baasparse baseline schema (0001_initial)

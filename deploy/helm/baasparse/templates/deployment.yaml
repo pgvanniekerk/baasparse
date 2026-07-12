@@ -25,7 +25,15 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
     spec:
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
-      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- if and .Values.posixData.enabled .Values.posixData.runAsUser }}
+        # Match the hostPath owner so app-created files are writable from the host
+        # (kubelet does not apply fsGroup to hostPath volumes).
+        runAsUser: {{ .Values.posixData.runAsUser }}
+        runAsGroup: {{ .Values.posixData.runAsUser }}
+        fsGroup: {{ .Values.posixData.runAsUser }}
+        {{- end }}
       containers:
         - name: baasparse
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -41,6 +49,14 @@ spec:
                 fieldRef: { fieldPath: metadata.name }
             - name: TMPDIR
               value: /tmp
+            {{- if and .Values.posixData.enabled .Values.posixData.runAsUser }}
+            # When we run as a non-image uid (to match the hostPath owner), the
+            # image's $HOME (/home/nonroot) is owned by the image uid and unreadable,
+            # which makes the config-file read fail. Point HOME at the writable
+            # scratch dir; runtime config comes from the environment regardless.
+            - name: HOME
+              value: /tmp
+            {{- end }}
             # GOMEMLIMIT = the container memory limit (bytes) → GC respects the cgroup.
             - name: GOMEMLIMIT
               valueFrom:
@@ -53,6 +69,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "baasparse.secretName" . }}
                   key: {{ .Values.database.existingSecretKey }}
+            {{- if .Values.secretKey }}
+            - name: BAASPARSE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "baasparse.fullname" . }}
+                  key: BAASPARSE_SECRET_KEY
+            {{- end }}
             {{- if eq .Values.storage.backend "s3" }}
             - name: BAASPARSE_S3_SECRET_KEY
               valueFrom:
@@ -75,6 +98,16 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.posixData.enabled }}
+            - name: file-data
+              mountPath: {{ .Values.posixData.mountPath | quote }}
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if .Values.posixData.enabled }}
+        - name: file-data
+          hostPath:
+            path: {{ .Values.posixData.hostPath | quote }}
+            type: Directory
+        {{- end }}

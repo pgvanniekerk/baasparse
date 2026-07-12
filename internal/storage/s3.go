@@ -51,6 +51,28 @@ func newS3(ctx context.Context, cfg Config) (*s3Store, error) {
 	return s, nil
 }
 
+// s3Ping validates an S3 endpoint + credentials without a specific bucket, for a
+// connection-only datasource. ListBuckets exercises auth and reachability; some
+// scoped credentials may lack s3:ListAllMyBuckets, in which case the operator can
+// instead test against a specific bucket (Probe via TestConnection).
+func s3Ping(ctx context.Context, cfg Config) error {
+	if cfg.Endpoint == "" {
+		return fmt.Errorf("storage: s3 requires an endpoint")
+	}
+	client, err := minio.New(cfg.Endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+		Secure: cfg.UseSSL,
+		Region: cfg.Region,
+	})
+	if err != nil {
+		return fmt.Errorf("storage: s3 client: %w", err)
+	}
+	if _, err := client.ListBuckets(ctx); err != nil {
+		return fmt.Errorf("storage: s3 connect: %w", err)
+	}
+	return nil
+}
+
 func (s *s3Store) Backend() string { return BackendS3 }
 
 func (s *s3Store) List(ctx context.Context, prefix string) ([]Entry, error) {

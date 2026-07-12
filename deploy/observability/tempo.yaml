@@ -1,0 +1,90 @@
+# Grafana Tempo (monolithic / single-binary) for baasparse distributed traces.
+# Deployed alongside the microk8s observability addon (which ships Prometheus +
+# Grafana + Loki but NOT Tempo). The baasparse OTel collector exports OTLP traces
+# here; view them in Grafana via the Tempo datasource.
+#
+#   microk8s kubectl apply -f deploy/observability/tempo.yaml
+#
+# Storage is an emptyDir (ephemeral — fine for a dev cluster; traces are dropped
+# on pod restart). Swap for a PVC on the microk8s-hostpath storage class to persist.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo
+  namespace: observability
+  labels: { app: tempo }
+data:
+  tempo.yaml: |
+    server:
+      http_listen_port: 3200
+      grpc_listen_port: 9095
+    distributor:
+      receivers:
+        otlp:
+          protocols:
+            grpc: { endpoint: 0.0.0.0:4317 }
+            http: { endpoint: 0.0.0.0:4318 }
+    ingester:
+      max_block_duration: 5m
+    compactor:
+      compaction:
+        block_retention: 48h
+    storage:
+      trace:
+        backend: local
+        wal: { path: /var/tempo/wal }
+        local: { path: /var/tempo/blocks }
+    usage_report:
+      reporting_enabled: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: observability
+  labels: { app: tempo }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: tempo }
+  template:
+    metadata:
+      labels: { app: tempo }
+    spec:
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: tempo
+          image: grafana/tempo:2.6.1
+          args: ["-config.file=/etc/tempo/tempo.yaml"]
+          ports:
+            - { name: http, containerPort: 3200 }   # query API (Grafana datasource)
+            - { name: otlp-grpc, containerPort: 4317 }
+            - { name: otlp-http, containerPort: 4318 }
+          readinessProbe:
+            httpGet: { path: /ready, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - { name: config, mountPath: /etc/tempo }
+            - { name: data, mountPath: /var/tempo }
+      volumes:
+        - name: config
+          configMap: { name: tempo }
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo
+  namespace: observability
+  labels: { app: tempo }
+spec:
+  selector: { app: tempo }
+  ports:
+    - { name: http, port: 3200, targetPort: http }
+    - { name: otlp-grpc, port: 4317, targetPort: otlp-grpc }
+    - { name: otlp-http, port: 4318, targetPort: otlp-http }

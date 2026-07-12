@@ -473,6 +473,21 @@ Every format definition body shares a common envelope — `kind`, `variant`, `en
 caps) — matching the GUI file-structure modelling flow (`BR-UI-004`): the operator
 models the file once; the sketches below are what the GUI persists.
 
+**As built (alpha).** Three of the five decoders are **wired** in the alpha data
+plane — DSV (`BR-DEC-003`), JSON (`BR-DEC-002`) and XML (`BR-DEC-011`) — over a
+simplified alpha spec envelope (`internal/spec.FormatSpec`: `kind` + one per-kind
+spec + a single flat `fields` declaration list shared by all three formats). Declared
+field types are applied as **best-effort coercion** at decode
+(`internal/decoder/coerce.go`) — DSV cells and XML text get the same typed values
+JSON produces natively; a value that does not parse is left unchanged (input decoding
+stays lenient; strict typing is the transform's job). ASN.1 (`BR-DEC-001`) and
+fixed-position (`BR-DEC-004`) remain **future** — §5.4.1/§5.4.5 are their forward
+design. Alpha failure handling is file-scoped: a decode error quarantines the file
+with a reason; the record-level failure→suspense isolation of §5.3.4 is not yet
+wired. Per-format as-built notes follow the JSON and XML sketches below; the mirror
+encoders are in [[07-distribution-delivery]] §7.3.1 and the measured numbers in
+[[14-performance-sizing]] §14.4.
+
 ### 5.4.1 ASN.1 BER/DER (`BR-DEC-001`)
 
 **Why not `encoding/asn1`.** The stdlib package is unusable for this job on four
@@ -613,6 +628,34 @@ whole-document unmarshal:
 }
 ```
 
+**As built (alpha).** The wired JSON decoder covers `ndjson` and `array` documents of
+**flat objects** (`internal/decoder/json.go`); the `recordPath` walk and per-field
+paths above are the forward design. The flat-object parse itself is **hand-rolled**
+(`internal/decoder/jsonfast.go`), replacing the earlier `encoding/json`
+map + `UseNumber` + key-sort route (which alone cost ~240 allocs/record on a
+50-field object):
+
+- **Document key order is preserved** (the map route sorted keys) — fields enter the
+  canonical record in source order.
+- **Zero-copy substrings** — keys and escape-free string values are sliced directly
+  out of the one per-line (or per-array-element) string, ≈1 alloc/record
+  steady-state; escaped strings are unescaped into a fresh buffer (`\uXXXX` incl.
+  surrogate pairs; unpaired surrogates → U+FFFD, matching the stdlib).
+- **Number semantics unchanged** — integral → `int64`, else `float64`, else
+  (unrepresentable, e.g. overflow) the raw text as a string — exactly the previous
+  `json.Number` behaviour.
+- **Nested objects/arrays are kept as their raw JSON source text** (previously they
+  were re-marshalled compact with sorted keys); the alpha treats them as opaque
+  string values.
+- Two deliberate divergences, both malformed-input territory: **duplicate keys —
+  the first occurrence wins** (the old map kept the last; RFC 8259 leaves duplicate
+  handling undefined), and **trailing non-whitespace after the object is an error**
+  (previously silently ignored) — garbage after a record now quarantines the file
+  with a reason instead of being dropped.
+
+Differential tests against `encoding/json` pin these semantics
+(`internal/decoder/jsonfast_test.go`).
+
 ### 5.4.3 XML (`BR-DEC-011`)
 
 Streaming over stdlib **`encoding/xml` token walk** — no DOM, no etree, no external
@@ -658,6 +701,56 @@ dependency:
   "fileTrailer": { "element": "/mmsBatch/summary", "recordCountField": "count" }
 }
 ```
+
+**As built (alpha) — WIRED, flat-record subset.** XML decode is live in the alpha
+data plane (`spec.FormatXML`); the path-addressed nested/repeated mapping and
+namespace handling above remain the forward design. The alpha spec shape is two
+optional strings (`internal/spec`):
+
+```go
+// XMLSpec configures the alpha's FLAT-record XML format.
+type XMLSpec struct {
+	// RecordElement is the repeated element holding one record. Decode: empty
+	// auto-detects the first element under the document root. Encode: the
+	// element written per record (default "record").
+	RecordElement string `json:"recordElement,omitempty"`
+	// RootElement is the document root the encoder wraps records in
+	// (default "records"). Ignored on decode.
+	RootElement string `json:"rootElement,omitempty"`
+}
+```
+
+Decode semantics (`internal/decoder/xml.go`):
+
+- **Streaming over `encoding/xml`'s `RawToken`** — `RawToken` (vs `Token`) skips
+  per-token namespace translation and start/end-tag matching, saving several
+  allocations per element; the decoder re-imposes well-formedness itself with an
+  open-element name stack (a mismatched close tag or unclosed element at EOF is a
+  decode error). **Entities and CDATA are still decoded inside the stdlib
+  tokenizer**; comments and processing instructions are consumed by it and ignored.
+- **Record element matching** — every occurrence of the configured element (by
+  **local name**, matched at any depth ≥ 2, i.e. anywhere below the document root)
+  yields one record; with `recordElement` unset the decoder **auto-detects** the
+  first element under the document root and uses its name.
+- **Flat fields** — a record's fields are the record element's **attributes** (in
+  document order, first) followed by one field per **direct child element**, whose
+  value is the child subtree's concatenated `CharData`, whitespace-trimmed
+  (`strings.TrimSpace`) — nested structure flattens to its text content in the
+  alpha. Stray character data at record level (indentation etc.) is ignored.
+- **Declared-type coercion** — XML values are text; declared fields coerce
+  best-effort exactly like DSV cells (§5.4 as-built intro), so `<size>1024</size>`
+  under a declared integer field yields the same typed value JSON produces natively.
+- One record struct is **reused across emits** (the pipeline consumes records
+  synchronously — same contract as the DSV/JSON decoders); the residual
+  ~305 allocs/record are the stdlib tokenizer's own — the documented exception in
+  [[14-performance-sizing]] §14.4.
+
+The GUI wizard models XML end-to-end ([[10-management-plane]] §10.5): an input-format
+option with the record element and sample-driven field detection, and an
+output-format option with root/record element settings. The mirror flat-record
+**encoder** (default `<records>`/`<record>` wrapping, escaping byte-identical to
+`encoding/xml.EscapeText`, sanitized element names, `.xml` + `application/xml`
+outputs) is specified in [[07-distribution-delivery]] §7.3.1.
 
 ### 5.4.4 DSV (`BR-DEC-003`)
 
@@ -815,7 +908,7 @@ Allocation discipline (steady state, per record):
 | Requirement | Where addressed |
 |-------------|-----------------|
 | BR-DEC-001 (ASN.1 BER/DER) | §5.4.1 — streaming TLV reader + declarative schema JSONB |
-| BR-DEC-002 (JSON) | §5.4.2 — NDJSON/array/object token-walk decoder |
+| BR-DEC-002 (JSON) | §5.4.2 — NDJSON/array/object token-walk decoder; ndjson/array flat-object decode **wired in the alpha** (hand-rolled parser, §5.4.2 as-built) |
 | BR-DEC-003 (DSV) | §5.4.4 — delimiter/quote/escape/header/encoding; requirement-bearing custom `rowReader` (stdlib `encoding/csv` as default-settings fast path only) |
 | BR-DEC-004 (fixed-position) | §5.4.5 — offset/length/pad/align/trim map, zero-copy slicing |
 | BR-DEC-005 (config-selected decoders, no code for the common case) | §5.3.2 registry + JSONB instantiation; §5.3.3 vendor-variant seam & onboarding process |
@@ -824,7 +917,7 @@ Allocation discipline (steady state, per record):
 | BR-DEC-008 (heterogeneous record types) | §5.3.5 discriminator rules; per-format `recordType` in §5.4 |
 | BR-DEC-009 (canonical typed representation) | §5.2 — kinds/units, hot-path form, JSONB form |
 | BR-DEC-010 (charset/code-page conversion) | §5.3.6 — stream-level `x/text` transforms + field-level telco decodes |
-| BR-DEC-011 (XML streaming decode) | §5.4.3 — `encoding/xml` token walk, record-per-element, nested/repeated mapping |
+| BR-DEC-011 (XML streaming decode) | §5.4.3 — `encoding/xml` token walk, record-per-element, nested/repeated mapping; flat-record subset **wired in the alpha** (§5.4.3 as-built) |
 | BR-DEC-012 (v2 event-time format selection; v1 seam) | §5.3.7 — `selectFormatVersion` single-function seam over temporal `FD_FORMAT_DEFINITION` |
 | BR-VAL-006 (header/trailer — decode side) | §5.5 recognition/extraction + `TrailerInfo`; verdict in [[06-pipeline-stages]] |
 | BR-VAL-007 (TAP3 — decode side) | §5.4.1 TAP3 note — BER decode, transfer/notification discrimination, file-sequence & declared-count extraction; profile in [[06-pipeline-stages]] |

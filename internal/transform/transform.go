@@ -41,9 +41,11 @@ func (e *Engine) Columns(sample *canonical.Record) []string {
 // reason code prefix (TRN_) for suspense routing (TS 02 §2.3.1).
 func (e *Engine) Apply(in *canonical.Record) (*canonical.Record, error) {
 	if e.isPassThrough() {
-		out := &canonical.Record{Seq: in.Seq, Fields: make([]canonical.Field, len(in.Fields))}
-		copy(out.Fields, in.Fields)
-		return out, nil
+		// Pass the record straight through — no copy. The pipeline consumes each
+		// record (encodes it) synchronously before the decoder produces the next, so
+		// there is no aliasing hazard, and this avoids a Record + Fields allocation
+		// per row on the common DSV<->JSON re-format path.
+		return in, nil
 	}
 	out := &canonical.Record{Seq: in.Seq, Fields: make([]canonical.Field, 0, len(e.spec.Fields))}
 	for _, f := range e.spec.Fields {

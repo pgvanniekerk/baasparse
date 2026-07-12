@@ -35,6 +35,68 @@ func (f *failPutStore) Move(context.Context, string, string) error  { return nil
 func (f *failPutStore) Delete(context.Context, string) error        { return nil }
 func (f *failPutStore) Close() error                                { return nil }
 
+// memBlobStore opens fixed content and drains Put to a discard, so the pipeline
+// runs to completion; used to exercise the decode/content-failure path.
+type memBlobStore struct{ data []byte }
+
+func (m *memBlobStore) Backend() string                                  { return "fake" }
+func (m *memBlobStore) List(context.Context, string) ([]storage.Entry, error) { return nil, nil }
+func (m *memBlobStore) Open(context.Context, string) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(m.data)), nil
+}
+func (m *memBlobStore) Put(_ context.Context, _ string, body io.Reader, _ storage.Meta) error {
+	_, err := io.Copy(io.Discard, body) // drain so the pipeline never blocks
+	return err
+}
+func (m *memBlobStore) Stat(context.Context, string) (storage.Entry, error) {
+	return storage.Entry{Size: int64(len(m.data))}, nil
+}
+func (m *memBlobStore) Move(context.Context, string, string) error { return nil }
+func (m *memBlobStore) Delete(context.Context, string) error       { return nil }
+func (m *memBlobStore) Close() error                               { return nil }
+
+func jsonPassthrough() store.Pipeline {
+	return store.Pipeline{
+		Name:      "t",
+		Input:     spec.FormatSpec{Kind: spec.FormatJSON, JSON: &spec.JSONSpec{Mode: "ndjson"}},
+		Transform: spec.TransformSpec{PassThrough: true},
+		Output:    spec.FormatSpec{Kind: spec.FormatJSON, JSON: &spec.JSONSpec{Mode: "ndjson"}},
+	}
+}
+
+// A destination write failure must be a RETRYABLE infrastructure error, never a
+// BadFileError — otherwise a valid input (esp. on a cross-backend output outage)
+// would be permanently quarantined instead of retried.
+func TestProcessFile_WriteFailureIsRetryableNotBadFile(t *testing.T) {
+	r := New(store.NewMem(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p := store.Pipeline{
+		Name:      "t",
+		Input:     spec.FormatSpec{Kind: spec.FormatDSV, DSV: &spec.DSVSpec{Delimiter: ",", HasHeader: true}},
+		Transform: spec.TransformSpec{PassThrough: true},
+		Output:    spec.FormatSpec{Kind: spec.FormatJSON, JSON: &spec.JSONSpec{Mode: "ndjson"}},
+	}
+	fs := &failPutStore{data: []byte("a,b\n1,2\n3,4\n")} // valid input, but Put fails
+	_, err := r.ProcessFile(context.Background(), p, fs, fs, "in/f.csv", "out", "done", nil)
+	if err == nil {
+		t.Fatal("expected an error from the failed Put")
+	}
+	var bad *BadFileError
+	if errors.As(err, &bad) {
+		t.Fatalf("a write/destination failure must NOT be a BadFileError (would wrongly quarantine a valid file); got %v", err)
+	}
+}
+
+// A genuinely malformed input must be a BadFileError so the watcher quarantines it.
+func TestProcessFile_MalformedInputIsBadFile(t *testing.T) {
+	r := New(store.NewMem(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	st := &memBlobStore{data: []byte("{\"a\":1}\nNOT JSON AT ALL\n")}
+	_, err := r.ProcessFile(context.Background(), jsonPassthrough(), st, st, "in/f.json", "out", "done", nil)
+	var bad *BadFileError
+	if !errors.As(err, &bad) {
+		t.Fatalf("a malformed input must be a BadFileError (to quarantine); got %v", err)
+	}
+}
+
 func TestProcessFile_PutFailureDoesNotHang(t *testing.T) {
 	r := New(store.NewMem(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	p := store.Pipeline{
@@ -47,7 +109,7 @@ func TestProcessFile_PutFailureDoesNotHang(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := r.ProcessFile(context.Background(), p, fs, "in/f.csv", "out", "done", nil)
+		_, err := r.ProcessFile(context.Background(), p, fs, fs, "in/f.csv", "out", "done", nil)
 		done <- err
 	}()
 
