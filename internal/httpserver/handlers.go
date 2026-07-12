@@ -106,16 +106,37 @@ func (s *Server) handlePipelineUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, perr := s.pipelineFromForm(r)
+	posted, perr := s.pipelineFromForm(r)
 	if perr != nil {
 		s.badRequest(w, perr)
 		return
 	}
+	if posted.Name == "" {
+		posted.Name = cur.Name
+	}
+	// Repointing a pipeline at a different INPUT datasource is refused once it has
+	// processed anything. Its exactly-once record is keyed on (SRC_UID, file name),
+	// and the SRC row survives the edit — so files on the new backend that merely
+	// share a name with something already processed would be skipped as re-arrivals
+	// and never delivered. A new source needs a new pipeline.
+	if posted.Source.DatasourceID != cur.Source.DatasourceID && cur.Source.DatasourceID != 0 {
+		n, cerr := s.store.CountProcessedFiles(r.Context(), cur.SrcUID)
+		if cerr != nil {
+			s.fail(w, cerr)
+			return
+		}
+		if n > 0 {
+			s.badRequest(w, fmt.Errorf(
+				"cannot repoint this pipeline at a different input datasource: it has already processed %d file(s), "+
+					"and its exactly-once record is keyed to the current source — files on the new source sharing a name "+
+					"with one of those would be silently skipped. Create a new pipeline instead", n))
+			return
+		}
+	}
+
+	p := mergeForEdit(cur, posted)
 	p.ID = id
 	p.SrcUID = cur.SrcUID
-	if p.Name == "" {
-		p.Name = cur.Name
-	}
 	if err := s.store.UpdatePipeline(r.Context(), p); err != nil {
 		s.badRequest(w, err)
 		return

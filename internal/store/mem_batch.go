@@ -295,3 +295,10 @@ func (m *Mem) SettledFileNames(_ context.Context, _ int64, names []string) (map[
 	}
 	return out, nil
 }
+
+// CountProcessedFiles counts recorded files (see PG.CountProcessedFiles).
+func (m *Mem) CountProcessedFiles(_ context.Context, _ int64) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.files), nil
+}

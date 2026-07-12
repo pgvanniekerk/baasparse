@@ -2,7 +2,9 @@ package httpserver
 
 import (
 	"encoding/json"
+	"strings"
 
+	"github.com/pgvanniekerk/baasparse/internal/spec"
 	"github.com/pgvanniekerk/baasparse/internal/store"
 )
 
@@ -205,4 +207,109 @@ func wizardJSON(m wizardModel) string {
 		return "null"
 	}
 	return string(b)
+}
+
+// mergeForEdit applies an edit to a stored pipeline.
+//
+// The rule is: an edit may only change what the editor can SHOW. Everything else is
+// carried forward verbatim.
+//
+// Taking the posted pipeline wholesale is what made editing dangerous: the wizard
+// renders a subset of a pipeline, so every field it does NOT render came back as a
+// zero value and silently erased what was stored. That is how an S3 archive
+// destination lost its endpoint, bucket and credentials — and archiving then stopped
+// forever, with nothing to show why. Starting from the stored pipeline and
+// overwriting only the wizard's own fields makes that impossible by construction,
+// rather than by remembering.
+//
+// It also means secrets never have to be round-tripped through the browser to
+// survive an edit.
+func mergeForEdit(stored, posted store.Pipeline) store.Pipeline {
+	out := stored // everything the wizard cannot show survives untouched
+
+	// --- fields the wizard genuinely owns ---
+	out.Name = posted.Name
+	out.Description = posted.Description
+	out.Enabled = posted.Enabled
+	out.Input = posted.Input
+	out.Input.DSV = keepDelimiter(stored.Input.DSV, out.Input.DSV)
+	out.Transform = posted.Transform
+	out.Output = posted.Output
+	out.Batch = posted.Batch
+
+	// Source: only the parts the wizard renders. Backend, root, the lifecycle
+	// directories and any credentials stay as stored — re-deriving the directories
+	// from a new name would relocate the watched folders and strand the files already
+	// sitting in them.
+	out.Source.DatasourceID = posted.Source.DatasourceID
+	out.Source.OutputDatasourceID = posted.Source.OutputDatasourceID
+	out.Source.OutputBucket = posted.Source.OutputBucket
+	out.Source.Disposition = posted.Source.Disposition
+	out.Source.PollSeconds = posted.Source.PollSeconds
+	out.Source.S3.Bucket = posted.Source.S3.Bucket
+	out.Source.S3.CreateBucket = posted.Source.S3.CreateBucket
+
+	// Archive: the wizard shows the policy and a posix destination root. An S3 archive
+	// destination's endpoint, region, bucket and credentials are NOT rendered, so they
+	// are preserved rather than blanked.
+	out.Archive = mergeArchive(stored.Archive, posted.Archive)
+
+	// Destinations: the wizard owns them, except for the bits it does not render —
+	// the DS row identity (which owns the output sequence) and the create-bucket flag.
+	out.Outputs = make([]store.Output, len(posted.Outputs))
+	copy(out.Outputs, posted.Outputs)
+	prior := map[string]store.Output{}
+	for _, o := range stored.Outputs {
+		prior[strings.ToLower(o.Name)] = o
+	}
+	for i := range out.Outputs {
+		if p, ok := prior[strings.ToLower(out.Outputs[i].Name)]; ok {
+			out.Outputs[i].DSUID = p.DSUID
+			out.Outputs[i].CreateBucket = p.CreateBucket
+			out.Outputs[i].Format.DSV = keepDelimiter(p.Format.DSV, out.Outputs[i].Format.DSV)
+		}
+	}
+	return out
+}
+
+// keepDelimiter preserves a delimiter the wizard cannot express.
+//
+// The wizard's delimiter is a four-option select, so delimiterName maps anything
+// outside {tab, pipe, semicolon} to "comma". A pipeline using some other character
+// would therefore come back as a comma on a save that never touched it. When the
+// selected option still NAMES the stored delimiter, the stored one is the truth.
+func keepDelimiter(stored, posted *spec.DSVSpec) *spec.DSVSpec {
+	if stored == nil || posted == nil {
+		return posted
+	}
+	if delimiterName(stored.Delimiter) == delimiterName(posted.Delimiter) {
+		posted.Delimiter = stored.Delimiter
+	}
+	return posted
+}
+
+// mergeArchive keeps the stored archive destination's connection (an S3 endpoint,
+// region, bucket and credentials) while taking the policy the wizard shows.
+func mergeArchive(stored, posted *store.Archive) *store.Archive {
+	if posted == nil || !posted.Enabled {
+		if stored == nil {
+			return posted
+		}
+		// Archiving turned off: keep the destination so turning it back on does not
+		// require re-entering the connection.
+		off := *stored
+		off.Enabled = false
+		return &off
+	}
+	merged := *posted
+	if stored != nil {
+		merged.Dest = stored.Dest // connection + credentials the wizard cannot show
+		if posted.Dest.Backend != "" {
+			merged.Dest.Backend = posted.Dest.Backend
+		}
+		if posted.Dest.Root != "" {
+			merged.Dest.Root = posted.Dest.Root
+		}
+	}
+	return &merged
 }

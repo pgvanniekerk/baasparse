@@ -694,11 +694,39 @@ func scanPipeline(row scannable) (Pipeline, error) {
 	// datasource, if any — as the "default" destination, so the data plane only
 	// ever deals with the Outputs slice and never with two shapes.
 	if len(p.Outputs) == 0 {
+		// The synthesized destination carries the pipeline-level transform EXPLICITLY.
+		//
+		// A nil Transform is ambiguous and the ambiguity is dangerous: the runner reads
+		// it as "inherit the pipeline transform", while anything that renders a
+		// destination reads it as "pass-through". A legacy pipeline loaded with nil and
+		// saved back would therefore have its whole field mapping replaced by
+		// pass-through — the feed silently starts emitting every raw column, unrenamed
+		// and untyped, and nothing says so. Materializing it here means nil never
+		// escapes the store, so the two readings cannot diverge.
+		tr := d.Transform
 		p.Outputs = []Output{{
 			Name: "default", Kind: OutputFile, Format: d.Output, Dir: d.OutputDir,
+			Transform:    &tr,
 			DatasourceID: src.OutputDatasourceID, Bucket: src.OutputBucket,
 			CreateBucket: src.S3.CreateBucket,
 		}}
+	}
+	// A destination written before destinations carried their own structure also has
+	// a nil transform. Same ambiguity, same fix.
+	for i := range p.Outputs {
+		if p.Outputs[i].Transform == nil {
+			tr := d.Transform
+			p.Outputs[i].Transform = &tr
+		}
+	}
+	// Legacy DSV inputs declared their columns but not their FIELDS. The wizard now
+	// derives everything from the declared fields, so a pipeline with columns and no
+	// fields would open with an empty field table and save with none — the decoder
+	// would then fall back to col1/col2/col3 and every downstream column would shift.
+	if len(p.Input.Fields) == 0 && p.Input.DSV != nil && len(p.Input.DSV.Columns) > 0 {
+		for _, c := range p.Input.DSV.Columns {
+			p.Input.Fields = append(p.Input.Fields, spec.FieldSpec{Name: c})
+		}
 	}
 	arc, err := decodeArchive(d.Archive)
 	if err != nil {
@@ -975,9 +1003,36 @@ func (p *PG) UpdatePipeline(ctx context.Context, pl Pipeline) error {
 	}
 	defer tx.Rollback(ctx)
 
-	// Carry forward each surviving destination's DS_UID (by name), and give any new
-	// destination a row of its own.
+	// Carry forward each destination's DS_UID BY NAME — and look it up across EVERY
+	// DS row this pipeline has ever had, not just the ones currently configured.
+	//
+	// A destination that was removed keeps its DS row (it owns delivery history). If
+	// it is later re-added under the same name and we minted a FRESH row, its gapless
+	// sequence would restart at 1 — and the output objects it writes would collide
+	// with, and overwrite, the ones the original destination already delivered under
+	// those numbers. Reclaiming the old row continues the sequence instead.
 	existing := map[string]int64{}
+	rows, err := p.pool.Query(ctx,
+		`SELECT DS_NAME, DS_UID FROM DS_DESTINATION WHERE DS_NAME LIKE $1 ORDER BY DS_UID`, cur.Name+"-%")
+	if err != nil {
+		return fmt.Errorf("load destinations: %w", err)
+	}
+	prefix := strings.ToLower(cur.Name) + "-"
+	for rows.Next() {
+		var dsName string
+		var uid int64
+		if err := rows.Scan(&dsName, &uid); err != nil {
+			rows.Close()
+			return err
+		}
+		if n := strings.ToLower(dsName); strings.HasPrefix(n, prefix) {
+			existing[strings.TrimPrefix(n, prefix)] = uid
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	for _, o := range cur.Outputs {
 		if o.DSUID != 0 {
 			existing[strings.ToLower(o.Name)] = o.DSUID
@@ -1032,18 +1087,51 @@ func (p *PG) UpdatePipeline(ctx context.Context, pl Pipeline) error {
 // structuralChange reports whether an edit touches anything the data plane runs on —
 // as opposed to the name, description or enabled flag, which are always safe to
 // change while files are in flight.
+//
+// It compares only what the data plane actually reads, and it compares the two sides
+// on EQUAL TERMS. Comparing a materialized pipeline against a freshly-parsed one made
+// every save look structural (resolved directories, DS UIDs and decrypted credentials
+// all differ), so no edit at all was possible while a batch was open — including the
+// name and description edits the UI promises are always allowed, and including the
+// "disable it and let it drain" step the error message tells the operator to take.
 func structuralChange(before, after Pipeline) bool {
-	a, _ := json.Marshal(struct {
-		In    spec.FormatSpec
-		Outs  []Output
-		Batch BatchSpec
-		Src   Source
-	}{before.Input, before.Outputs, before.Batch, before.Source})
-	b, _ := json.Marshal(struct {
-		In    spec.FormatSpec
-		Outs  []Output
-		Batch BatchSpec
-		Src   Source
-	}{after.Input, after.Outputs, after.Batch, after.Source})
-	return string(a) != string(b)
+	return dataPlaneShape(before) != dataPlaneShape(after)
+}
+
+// dataPlaneShape is the part of a pipeline the runner and watcher actually behave on.
+// Deliberately NOT the whole Source: its credentials are decrypted on load and its
+// directories are re-derived, neither of which changes how a file is processed.
+func dataPlaneShape(p Pipeline) string {
+	type destShape struct {
+		Name      string
+		Kind      string
+		Format    spec.FormatSpec
+		Transform *spec.TransformSpec
+		Dir       string
+		DSUID     int64
+		DSID      int64
+		Bucket    string
+	}
+	shape := struct {
+		Input       spec.FormatSpec
+		Dests       []destShape
+		Batch       BatchSpec
+		InputDir    string
+		Disposition string
+		DSID        int64
+	}{
+		Input:       p.Input,
+		Batch:       p.Batch,
+		InputDir:    p.Source.InputDir,
+		Disposition: p.Source.Disposition,
+		DSID:        p.Source.DatasourceID,
+	}
+	for _, o := range p.Outputs {
+		shape.Dests = append(shape.Dests, destShape{
+			Name: o.Name, Kind: o.Kind, Format: o.Format, Transform: o.Transform,
+			Dir: o.Dir, DSUID: o.DSUID, DSID: o.DatasourceID, Bucket: o.Bucket,
+		})
+	}
+	b, _ := json.Marshal(shape)
+	return string(b)
 }

@@ -190,6 +190,21 @@
     return p.length >= 2 && p.charAt(0) === "'" && p.charAt(p.length - 1) === "'";
   }
 
+  // splitParts splits a concat list on commas OUTSIDE quotes, so a literal comma
+  // (the perfectly reasonable "a,','," ) survives instead of being torn into pieces
+  // that then fail to save.
+  function splitParts(v) {
+    var out = [], cur = "", inQ = false;
+    for (var i = 0; i < v.length; i++) {
+      var c = v.charAt(i);
+      if (c === "'") { inQ = !inQ; cur += c; continue; }
+      if (c === "," && !inQ) { if (cur.trim()) out.push(cur.trim()); cur = ""; continue; }
+      cur += c;
+    }
+    if (cur.trim()) out.push(cur.trim());
+    return out;
+  }
+
   // ================= edit: hydrate from an existing pipeline =================
   //
   // The editor is the SAME wizard as create, filled in. Anything not restored here
@@ -291,6 +306,7 @@
         kind: x.kind || "field",
         source: x.source || "",
         value: x.kind === "const" ? (x.const || "") : (x.parts || []).join(", "),
+        sep: x.sep || "",
         type: x.type || "",
       };
     });
@@ -350,8 +366,8 @@
         if (!f.output) return;
         if (f.kind === "concat") {
           fields.push({
-            output: f.output, kind: "concat", type: f.type, sep: "",
-            parts: (f.value || "").split(",").map(function (p) { return p.trim(); }).filter(Boolean),
+            output: f.output, kind: "concat", type: f.type, sep: f.sep || "",
+            parts: splitParts(f.value || ""),
           });
         } else if (f.kind === "const") {
           fields.push({ output: f.output, kind: "const", const: f.value || "", type: f.type });
@@ -561,6 +577,7 @@
     names.forEach(function (n) { sel.appendChild(new Option(n, n)); });
 
     if (row) {
+      if (row.sep) tr.setAttribute("data-sep", row.sep);
       qs(".f-out", tr).value = row.output || "";
       qs(".f-kind", tr).value = row.kind || "field";
       qs(".f-type", tr).value = row.type || "";
@@ -647,6 +664,7 @@
         kind: kind,
         source: qs(".f-source", tr).value,
         value: value,
+        sep: tr.getAttribute("data-sep") || "",  // preserved; the table does not edit it
         type: qs(".f-type", tr).value,
       };
     }).filter(function (f) { return f.output; });

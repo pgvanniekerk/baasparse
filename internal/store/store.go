@@ -198,6 +198,7 @@ type Store interface {
 	CloseBatch(ctx context.Context, b Batch, pfs []ProcessedFile, claims []Claim, dels []Delivery, contribs map[int64][]Contribution) (bool, error)
 	RecordBatchContributions(ctx context.Context, btUID int64, cs []Contribution) error
 	SettledFileNames(ctx context.Context, srcUID int64, names []string) (map[string]bool, error)
+	CountProcessedFiles(ctx context.Context, srcUID int64) (int, error)
 	TouchBatchAttempt(ctx context.Context, btUID int64, reason string) (int, error)
 	DropBatchFile(ctx context.Context, b Batch, name string) error
 	AbandonBatch(ctx context.Context, btUID int64, reason string) error

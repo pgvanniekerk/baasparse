@@ -628,3 +628,15 @@ func (p *PG) SettledFileNames(ctx context.Context, srcUID int64, names []string)
 	}
 	return out, rows.Err()
 }
+
+// CountProcessedFiles is how many files this source has recorded (DONE or
+// QUARANTINED). The management plane uses it to refuse edits that would invalidate
+// the exactly-once record — it is keyed on (SRC_UID, name), so repointing a
+// pipeline at a different source would make files there collide with names already
+// processed and be skipped as re-arrivals.
+func (p *PG) CountProcessedFiles(ctx context.Context, srcUID int64) (int, error) {
+	var n int
+	err := p.pool.QueryRow(ctx,
+		`SELECT count(*) FROM PF_PROCESSED_FILE WHERE PF_SRC_UID=$1`, srcUID).Scan(&n)
+	return n, err
+}

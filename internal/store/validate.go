@@ -23,17 +23,22 @@ func ValidatePipeline(p Pipeline) error {
 		return err
 	}
 	declared := declaredInputFields(p.Input)
-	if len(declared) == 0 {
-		// Nothing declared: there is nothing to check against, and a pipeline written
-		// before fields were declared must still load and save.
-		return nil
-	}
+	// An empty declaration is NOT a free pass. If it were, removing every input field
+	// at once would slip past the very guard that refuses removing one of them — the
+	// destinations would keep their mappings and emit nulls forever. It is only benign
+	// when nothing references an input at all.
 	for _, o := range p.Outputs {
 		if o.Transform == nil || o.Transform.PassThrough {
 			continue // takes whatever the record carries; nothing to dangle
 		}
 		for _, f := range o.Transform.Fields {
 			for _, ref := range referencedInputs(f) {
+				if len(declared) == 0 {
+					return fmt.Errorf(
+						"destination %q builds output field %q from input field %q, but the input declares no fields at all — "+
+							"declare the input fields, or change that destination",
+						o.Name, f.Output, ref)
+				}
 				if !declared[ref] {
 					return fmt.Errorf(
 						"destination %q builds output field %q from input field %q, which is not declared on the input — "+
