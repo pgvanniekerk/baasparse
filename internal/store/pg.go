@@ -349,8 +349,9 @@ func (p *PG) CreatePipeline(ctx context.Context, pl Pipeline) (int64, error) {
 	}
 	// Pipeline identity
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO PL_PIPELINE (PL_NAME, PL_STATUS, PL_CREATED_BY, PL_MODIFIED_BY)
-		VALUES ($1,'ACTIVE',$2,$2) RETURNING PL_UID`, pl.Name, by).Scan(&plUID); err != nil {
+		INSERT INTO PL_PIPELINE (PL_NAME, PL_DESCRIPTION, PL_STATUS, PL_CREATED_BY, PL_MODIFIED_BY)
+		VALUES ($1,NULLIF($2,''),'ACTIVE',$3,$3) RETURNING PL_UID`,
+		pl.Name, pl.Description, by).Scan(&plUID); err != nil {
 		return 0, fmt.Errorf("insert PL: %w", err)
 	}
 	// The doc is composed only NOW: it carries each destination's DS_UID, which
@@ -384,7 +385,7 @@ func (p *PG) CreatePipeline(ctx context.Context, pl Pipeline) (int64, error) {
 
 func (p *PG) ListPipelines(ctx context.Context) ([]Pipeline, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT PL.PL_UID, COALESCE(SRC.SRC_UID,0), PL.PL_NAME, PL.PL_CREATED_ON, PLV.PLV_STAGE_GRAPH
+		SELECT PL.PL_UID, COALESCE(SRC.SRC_UID,0), PL.PL_NAME, COALESCE(PL.PL_DESCRIPTION,''), PL.PL_CREATED_ON, PLV.PLV_STAGE_GRAPH
 		FROM PL_PIPELINE PL
 		JOIN PLV_PIPELINE_VERSION PLV ON PLV.PLV_PL_UID = PL.PL_UID AND PLV.PLV_STATUS='PUBLISHED' AND PLV.PLV_END_DATE IS NULL
 		LEFT JOIN SRC_SOURCE SRC ON SRC.SRC_PL_UID = PL.PL_UID AND SRC.SRC_STATUS='PUBLISHED' AND SRC.SRC_END_DATE IS NULL
@@ -417,7 +418,7 @@ func (p *PG) ListPipelines(ctx context.Context) ([]Pipeline, error) {
 
 func (p *PG) GetPipeline(ctx context.Context, id int64) (Pipeline, error) {
 	row := p.pool.QueryRow(ctx, `
-		SELECT PL.PL_UID, COALESCE(SRC.SRC_UID,0), PL.PL_NAME, PL.PL_CREATED_ON, PLV.PLV_STAGE_GRAPH
+		SELECT PL.PL_UID, COALESCE(SRC.SRC_UID,0), PL.PL_NAME, COALESCE(PL.PL_DESCRIPTION,''), PL.PL_CREATED_ON, PLV.PLV_STAGE_GRAPH
 		FROM PL_PIPELINE PL
 		JOIN PLV_PIPELINE_VERSION PLV ON PLV.PLV_PL_UID = PL.PL_UID AND PLV.PLV_STATUS='PUBLISHED' AND PLV.PLV_END_DATE IS NULL
 		LEFT JOIN SRC_SOURCE SRC ON SRC.SRC_PL_UID = PL.PL_UID AND SRC.SRC_STATUS='PUBLISHED' AND SRC.SRC_END_DATE IS NULL
@@ -662,7 +663,7 @@ func scanPipeline(row scannable) (Pipeline, error) {
 		p   Pipeline
 		doc []byte
 	)
-	if err := row.Scan(&p.ID, &p.SrcUID, &p.Name, &p.CreatedOn, &doc); err != nil {
+	if err := row.Scan(&p.ID, &p.SrcUID, &p.Name, &p.Description, &p.CreatedOn, &doc); err != nil {
 		return Pipeline{}, err
 	}
 	var d pipelineDoc
@@ -924,4 +925,125 @@ func compressionDB(c string) string {
 	default:
 		return "GZIP"
 	}
+}
+
+// UpdatePipeline saves an edited pipeline.
+//
+// Two things make this more than "write the new document":
+//
+//  1. A destination that is REMOVED keeps its DS_DESTINATION row. It owns delivery
+//     history (DL rows, and a sequence other systems have already consumed), so
+//     deleting it would either fail on the foreign key or erase the audit trail of
+//     data that really was delivered. It is simply dropped from the document, which
+//     stops future delivery while leaving what happened intact.
+//
+//  2. A destination that SURVIVES keeps its DS_UID, matched by name. That is what
+//     continues its output sequence: give it a fresh DS row and its numbering would
+//     restart at 1, and downstream gap detection would see the whole history vanish.
+//
+// Structural edits are refused while a batch is open. An open batch has already
+// reserved deliveries against the destinations as they were; changing them
+// underneath it can leave it referencing a destination that no longer exists, which
+// it can never complete — and, if some destinations already published, cannot be
+// abandoned either. Editing the name, description or enabled flag is always allowed.
+func (p *PG) UpdatePipeline(ctx context.Context, pl Pipeline) error {
+	if err := ValidatePipeline(pl); err != nil {
+		return err
+	}
+	cur, err := p.GetPipeline(ctx, pl.ID)
+	if err != nil {
+		return err
+	}
+	if structuralChange(cur, pl) {
+		open, err := p.ListOpenBatches(ctx, cur.SrcUID)
+		if err != nil {
+			return err
+		}
+		if len(open) > 0 {
+			return fmt.Errorf("cannot change the input, transform or destinations while %d batch(es) are still in flight: "+
+				"disable the pipeline, let them finish, then edit", len(open))
+		}
+	}
+
+	by := pl.CreatedBy
+	if by == "" {
+		by = "operator"
+	}
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Carry forward each surviving destination's DS_UID (by name), and give any new
+	// destination a row of its own.
+	existing := map[string]int64{}
+	for _, o := range cur.Outputs {
+		if o.DSUID != 0 {
+			existing[strings.ToLower(o.Name)] = o.DSUID
+		}
+	}
+	for i := range pl.Outputs {
+		o := &pl.Outputs[i]
+		if uid, ok := existing[strings.ToLower(o.Name)]; ok {
+			o.DSUID = uid
+			continue
+		}
+		dsJSON, _ := json.Marshal(map[string]any{
+			"format": o.Format, "dir": o.Dir, "datasourceID": o.DatasourceID, "bucket": o.Bucket,
+		})
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO DS_DESTINATION (DS_VERSION_NO, DS_STATUS, DS_EFFECTIVE_FROM, DS_NAME, DS_KIND, DS_SPEC, DS_SPOOL_POLICY, DS_RETENTION, DS_CREATED_BY, DS_MODIFIED_BY)
+			VALUES (1,'PUBLISHED',now(),$1,'FILE',$2,'{}'::jsonb,'{}'::jsonb,$3,$3) RETURNING DS_UID`,
+			pl.Name+"-"+o.Name, dsJSON, by).Scan(&o.DSUID); err != nil {
+			return fmt.Errorf("insert DS %q: %w", o.Name, err)
+		}
+	}
+
+	doc, err := buildDoc(pl)
+	if err != nil {
+		return err
+	}
+	docJSON, _ := json.Marshal(doc)
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE PL_PIPELINE SET PL_NAME=$2, PL_DESCRIPTION=NULLIF($3,''), PL_MODIFIED_BY=$4, PL_MODIFIED_ON=now()
+		WHERE PL_UID=$1`, pl.ID, pl.Name, pl.Description, by); err != nil {
+		return fmt.Errorf("update PL: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE PLV_PIPELINE_VERSION SET PLV_STAGE_GRAPH=$2, PLV_MODIFIED_BY=$3, PLV_MODIFIED_ON=now()
+		WHERE PLV_PL_UID=$1 AND PLV_STATUS='PUBLISHED' AND PLV_END_DATE IS NULL`,
+		pl.ID, docJSON, by); err != nil {
+		return fmt.Errorf("update PLV: %w", err)
+	}
+	// Keep the denormalized source areas in step with the document.
+	inputDirs, _ := json.Marshal([]string{doc.InputDir})
+	if _, err := tx.Exec(ctx, `
+		UPDATE SRC_SOURCE SET SRC_INPUT_DIRS=$2, SRC_IN_PROGRESS_DIR=$3, SRC_DONE_DIR=$4, SRC_QUARANTINE_DIR=$5,
+			SRC_MODIFIED_BY=$6, SRC_MODIFIED_ON=now()
+		WHERE SRC_PL_UID=$1 AND SRC_STATUS='PUBLISHED' AND SRC_END_DATE IS NULL`,
+		pl.ID, inputDirs, pl.Source.InProgressDir, pl.Source.DoneDir, pl.Source.QuarantineDir, by); err != nil {
+		return fmt.Errorf("update SRC: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// structuralChange reports whether an edit touches anything the data plane runs on —
+// as opposed to the name, description or enabled flag, which are always safe to
+// change while files are in flight.
+func structuralChange(before, after Pipeline) bool {
+	a, _ := json.Marshal(struct {
+		In    spec.FormatSpec
+		Outs  []Output
+		Batch BatchSpec
+		Src   Source
+	}{before.Input, before.Outputs, before.Batch, before.Source})
+	b, _ := json.Marshal(struct {
+		In    spec.FormatSpec
+		Outs  []Output
+		Batch BatchSpec
+		Src   Source
+	}{after.Input, after.Outputs, after.Batch, after.Source})
+	return string(a) != string(b)
 }

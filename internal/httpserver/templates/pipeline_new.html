@@ -4,11 +4,14 @@
 {{template "nav" .}}
 <main class="content">
   <header class="topbar">
-    <div><h1>New pipeline</h1><p class="sub">Step through the source, declare the input fields, then map them to the output — preview it live before you save.</p></div>
+    <div>
+      <h1>{{if .Data.Pipeline}}Edit pipeline{{else}}New pipeline{{end}}</h1>
+      <p class="sub">{{if .Data.Pipeline}}Changing the input, transform or destinations is refused while a batch is still in flight — disable the pipeline and let it drain first.{{else}}Step through the source, declare the input fields, then map them to the destinations — preview it live before you save.{{end}}</p>
+    </div>
     <a class="btn ghost" href="/pipelines">Cancel</a>
   </header>
 
-  <form id="builder" method="post" action="/pipelines" class="builder wizard">
+  <form id="builder" method="post" action="{{if .Data.Pipeline}}/pipelines/{{.Data.Pipeline.ID}}{{else}}/pipelines{{end}}" class="builder wizard">
     <div class="builder-grid">
       <!-- LEFT: stepped configuration -->
       <div class="col">
@@ -226,7 +229,16 @@
             </div>
           </div>
 
-          <div class="wiznav"><button type="button" class="btn ghost" data-action="prev-step">← Back</button><button type="submit" class="btn primary lg">Create pipeline</button></div>
+          <div class="card">
+            <div class="card-head"><h2>Description</h2></div>
+            <p class="hint">A note for whoever finds this pipeline later — what it is for, who consumes it. It is the only description the pipelines list shows.</p>
+            <div class="field">
+              <textarea name="description" rows="2" placeholder="Voice CDRs from the Joburg mediation drop → billing (DSV) and revenue assurance (JSON)">{{if .Data.Pipeline}}{{.Data.Pipeline.Description}}{{end}}</textarea>
+            </div>
+          </div>
+
+          <div class="wiznav"><button type="button" class="btn ghost" data-action="prev-step">← Back</button>
+            <button type="submit" class="btn primary lg">{{if .Data.Pipeline}}Save changes{{else}}Create pipeline{{end}}</button></div>
         </section>
       </div>
 
@@ -429,6 +441,7 @@
   </tr>
 </template>
 
+{{if .Data.WizardJSON}}<script>window.__WIZARD__ = {{.Data.WizardJSON}};</script>{{end}}
 {{template "foot" .}}
 
 <template id="decl-row-tpl">

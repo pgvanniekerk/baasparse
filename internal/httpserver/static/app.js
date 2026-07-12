@@ -11,8 +11,10 @@
   // --- seed starter rows on the builder page ---
   document.addEventListener("DOMContentLoaded", function () {
     if (qs("#decl-rows") && qs("#decl-rows").children.length === 0) addDeclRow();
-    // Seed the common single-destination case so it needs no clicks at all.
-    if (qs("#dest-rows") && dests.length === 0) { dests.push(newDest("default")); renderDests(); }
+    // Editing an existing pipeline: hydrate the wizard from it. Otherwise seed the
+    // common single-destination case so creating needs no clicks at all.
+    if (window.__WIZARD__) hydrate(window.__WIZARD__);
+    else if (qs("#dest-rows") && dests.length === 0) { dests.push(newDest("default")); renderDests(); }
   });
 
   // ================= wizard steps =================
@@ -114,7 +116,7 @@
     else if (action === "prev-step") { e.preventDefault(); clearAllErrors(); showStep(Math.max(currentStep() - 1, 1)); }
     else if (action === "goto-step") { e.preventDefault(); advanceStep(Number(el.getAttribute("data-step"))); }
     else if (action === "add-decl") { e.preventDefault(); addDeclRow(); }
-    else if (action === "remove-decl") { e.preventDefault(); var dr = el.closest("tr"); if (dr) dr.remove(); }
+    else if (action === "remove-decl") { e.preventDefault(); removeDeclField(el); }
     else if (action === "parse-fields") { e.preventDefault(); parseFieldsFromSample(); }
     else if (action === "preview") { e.preventDefault(); runPreview(); }
     else if (action === "sample") { e.preventDefault(); loadSample(el.getAttribute("data-kind")); }
@@ -142,6 +144,158 @@
     closeDsPicker();
     if (qs("#dest-modal") && !qs("#dest-modal").hidden) closeDest();
   });
+
+  // An input field cannot be removed while a destination draws from it: the
+  // destination would keep emitting that column, forever empty. The server refuses
+  // the save regardless — this just says so at the moment of the mistake, and names
+  // who is using it, so the operator knows what to fix.
+  function removeDeclField(btn) {
+    var tr = btn.closest("tr");
+    if (!tr) return;
+    var input = qs('input[name="decl_name"]', tr);
+    var name = input ? input.value.trim() : "";
+    var users = name ? destinationsUsing(name) : [];
+    if (users.length) {
+      showStepError(stepSection(2),
+        'Cannot remove "' + name + '" — ' + users.join(" and ") +
+        (users.length > 1 ? " draw" : " draws") + " output fields from it. " +
+        "Change " + (users.length > 1 ? "those destinations" : "that destination") + " first.");
+      flashInvalid(input);
+      return;
+    }
+    clearStepError(stepSection(2));
+    tr.remove();
+  }
+
+  // destinationsUsing names every destination whose output structure references this
+  // input field — directly, or as part of a concat. Quoted literals are not fields.
+  function destinationsUsing(name) {
+    var out = [];
+    dests.forEach(function (d) {
+      if (d.passThrough) return; // takes whatever arrives; nothing specific to dangle
+      var uses = d.fields.some(function (f) {
+        if (f.kind === "const") return false;
+        if (f.kind === "concat") {
+          return (f.value || "").split(",").map(function (p) { return p.trim(); })
+            .some(function (p) { return p && !isQuoted(p) && p === name; });
+        }
+        return (f.source || f.output) === name;
+      });
+      if (uses && out.indexOf(d.name) === -1) out.push(d.name);
+    });
+    return out;
+  }
+
+  function isQuoted(p) {
+    return p.length >= 2 && p.charAt(0) === "'" && p.charAt(p.length - 1) === "'";
+  }
+
+  // ================= edit: hydrate from an existing pipeline =================
+  //
+  // The editor is the SAME wizard as create, filled in. Anything not restored here
+  // silently reverts to a default on save, so this must cover every control the
+  // wizard writes — that is why the model is built server-side in typed Go rather
+  // than scraped out of the rendered page.
+  function hydrate(m) {
+    setVal('input[name="name"]', m.name);
+    setVal('textarea[name="description"]', m.description);
+    setChecked('input[name="enabled"]', m.enabled);
+    setVal('select[name="disposition"]', m.disposition);
+
+    // datasources (the picker writes a hidden id + a label)
+    if (m.datasourceID) selectDs("input", m.datasourceID);
+    if (m.outputDatasourceID) selectDs("output", m.outputDatasourceID);
+    setVal('input[name="ds_bucket"]', m.bucket);
+    setChecked('input[name="ds_create_bucket"]', m.createBucket);
+    setVal('input[name="ds_output_bucket"]', m.outputBucket);
+
+    // input format + declared fields
+    if (m.input) {
+      setKind("input", m.input.kind || "dsv");
+      setVal('select[name="input_delimiter"]', m.input.delimiter);
+      setChecked('input[name="input_has_header"]', m.input.hasHeader);
+      setVal('select[name="input_json_mode"]', m.input.jsonMode);
+      setVal('input[name="input_xml_root"]', m.input.xmlRoot);
+      setVal('input[name="input_xml_record"]', m.input.xmlRecord);
+      setChecked('input[name="input_container"]', m.input.container);
+      var co = qs("#container-opts");
+      if (co) co.hidden = !m.input.container;
+      setVal('input[name="input_member_glob"]', m.input.memberGlob);
+
+      var host = qs("#decl-rows");
+      if (host) host.innerHTML = "";
+      (m.input.fields || []).forEach(function (f) {
+        addDeclRow();
+        var tr = qs("#decl-rows tr:last-child");
+        if (!tr) return;
+        setVal('input[name="decl_name"]', f.name, tr);
+        setVal('select[name="decl_type"]', f.type, tr);
+      });
+    }
+
+    // consolidation
+    if (m.batch) {
+      setChecked('input[name="batch_enabled"]', m.batch.enabled);
+      var bo = qs("#batch-opts");
+      if (bo) bo.hidden = !m.batch.enabled;
+      if (m.batch.maxFiles) setVal('input[name="batch_max_files"]', m.batch.maxFiles);
+      if (m.batch.maxMB) setVal('input[name="batch_max_mb"]', m.batch.maxMB);
+      if (m.batch.maxAgeSeconds != null) setVal('input[name="batch_max_age_seconds"]', m.batch.maxAgeSeconds);
+    }
+
+    // destinations
+    dests = (m.destinations || []).map(formToDest);
+    renderDests();
+  }
+
+  // formToDest is the inverse of destJSON: the server's blob back into the editor's
+  // working shape. The two must stay inverses, or opening and saving a pipeline
+  // without touching it would change it.
+  function formToDest(df) {
+    var d = newDest(df.name);
+    d.kind = df.kind || "file";
+    d.datasource = df.datasourceID ? String(df.datasourceID) : "";
+    d.bucket = df.bucket || "";
+    d.dir = df.dir || "";
+    var f = df.format || {};
+    d.format = f.kind || "json";
+    d.delimiter = f.delimiter || "comma";
+    d.hasHeader = f.hasHeader ? "1" : "0";
+    d.jsonMode = f.jsonMode || "ndjson";
+    d.xmlRoot = f.xmlRoot || "";
+    d.xmlRecord = f.xmlRecord || "";
+    d.compress = df.compress ? "1" : "0";
+    d.table = df.table || "";
+    d.dbMode = df.dbMode || "insert";
+    d.passThrough = !!df.passThrough;
+    d.fields = (df.fields || []).map(function (x) {
+      return {
+        output: x.output,
+        kind: x.kind || "field",
+        source: x.source || "",
+        value: x.kind === "const" ? (x.const || "") : (x.parts || []).join(", "),
+        type: x.type || "",
+      };
+    });
+    return d;
+  }
+
+  function selectDs(target, id) {
+    var opt = qs('#ds-modal-list .ds-opt[data-id="' + id + '"]');
+    if (opt) { chooseDsFor(target, opt); return; }
+    var hidden = qs(target === "input" ? 'input[name="datasource_id"]' : 'input[name="output_datasource_id"]');
+    if (hidden) hidden.value = id;
+  }
+
+  function setVal(sel, v, root) {
+    var el = qs(sel, root);
+    if (el && v != null && v !== "") el.value = v;
+  }
+
+  function setChecked(sel, on) {
+    var el = qs(sel);
+    if (el) el.checked = !!on;
+  }
 
   // ================= destinations =================
   //
@@ -550,7 +704,12 @@
   // connection line, and reveal the per-type bucket field for s3.
   function chooseDs(li) {
     var m = qs("#ds-modal");
-    var target = m ? m.getAttribute("data-target") : "input";
+    chooseDsFor(m ? m.getAttribute("data-target") : "input", li);
+  }
+
+  // chooseDsFor applies a datasource to a named selector. Split out from chooseDs so
+  // that hydrating an edit can select one without the picker being open.
+  function chooseDsFor(target, li) {
     var id = li.getAttribute("data-id"), kind = li.getAttribute("data-kind");
     var name = li.getAttribute("data-name"), conn = li.getAttribute("data-conn") || "";
     var hidden = qs(target === "output" ? '[name="output_datasource_id"]' : '[name="datasource_id"]');

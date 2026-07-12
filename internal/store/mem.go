@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -236,7 +237,7 @@ func (m *Mem) MarkArchived(_ context.Context, _ int64, run ArchiveRun) (int64, e
 }
 
 func (m *Mem) Ping(_ context.Context) error { return nil }
-func (m *Mem) Close()                        {}
+func (m *Mem) Close()                       {}
 
 // --- distributed claim (in-memory: single instance, always grants) ---
 
@@ -364,5 +365,30 @@ func (m *Mem) RevokeSession(_ context.Context, tokenHash []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.sessions, string(tokenHash))
+	return nil
+}
+
+// UpdatePipeline replaces a pipeline in place, carrying forward each surviving
+// destination's DS UID by name (see PG.UpdatePipeline).
+func (m *Mem) UpdatePipeline(_ context.Context, p Pipeline) error {
+	if err := ValidatePipeline(p); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.pipes[p.ID]
+	if !ok {
+		return ErrNotFound
+	}
+	existing := map[string]int64{}
+	for _, o := range cur.Outputs {
+		existing[strings.ToLower(o.Name)] = o.DSUID
+	}
+	for i := range p.Outputs {
+		if uid, ok := existing[strings.ToLower(p.Outputs[i].Name)]; ok && p.Outputs[i].DSUID == 0 {
+			p.Outputs[i].DSUID = uid
+		}
+	}
+	m.pipes[p.ID] = p
 	return nil
 }

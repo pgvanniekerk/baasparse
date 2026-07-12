@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/pgvanniekerk/baasparse/internal/pipeline"
@@ -57,40 +59,99 @@ func (s *Server) handlePipelineNew(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "pipeline_new", s.page(r, "pipelines", map[string]any{"Datasources": dss}))
 }
 
-func (s *Server) handlePipelineCreate(w http.ResponseWriter, r *http.Request) {
+// handlePipelineEdit renders the SAME wizard as create, hydrated from the stored
+// pipeline. Reusing it is the point: an editor that drifts from the creator is an
+// editor that quietly saves a different pipeline than the one shown.
+func (s *Server) handlePipelineEdit(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	p, err := s.store.GetPipeline(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	dss, _ := s.store.ListDatasources(r.Context())
+	s.render(w, "pipeline_new", s.page(r, "pipelines", map[string]any{
+		"Datasources": dss,
+		"Pipeline":    p,
+		"WizardJSON":  template.JS(wizardJSON(buildWizardModel(p))),
+	}))
+}
+
+// handlePipelineUpdate saves an edited pipeline.
+func (s *Server) handlePipelineUpdate(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
 	if err := r.ParseForm(); err != nil {
 		s.fail(w, err)
 		return
 	}
+	cur, err := s.store.GetPipeline(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	p, perr := s.pipelineFromForm(r)
+	if perr != nil {
+		s.badRequest(w, perr)
+		return
+	}
+	p.ID = id
+	p.SrcUID = cur.SrcUID
+	if p.Name == "" {
+		p.Name = cur.Name
+	}
+	if err := s.store.UpdatePipeline(r.Context(), p); err != nil {
+		s.badRequest(w, err)
+		return
+	}
+	if updated, gerr := s.store.GetPipeline(r.Context(), id); gerr == nil {
+		s.provisionDirs(r.Context(), updated)
+	}
+	http.Redirect(w, r, fmt.Sprintf("/pipelines/%d", id), http.StatusSeeOther)
+}
+
+// pipelineFromForm builds a pipeline from the wizard's form. Create and edit share
+// it deliberately: two parsers would drift, and a drifting editor saves a different
+// pipeline than the one it showed.
+func (s *Server) pipelineFromForm(r *http.Request) (store.Pipeline, error) {
 	src := parseSource(r)
 	p := store.Pipeline{
-		Name:      r.FormValue("name"),
-		Enabled:   r.FormValue("enabled") == "on",
-		InputDir:  src.InputDir,
-		OutputDir: src.OutputDir,
-		Input:     parseFormatSpec(r, "input"),
-		Output:    parseFormatSpec(r, "output"),
-		Transform: parseTransform(r),
-		Source:    src,
-		Archive:   parseArchive(r),
-		CreatedBy: "operator",
-	}
-	if p.Name == "" {
-		p.Name = "pipeline-" + time.Now().Format("150405")
+		Name:        strings.TrimSpace(r.FormValue("name")),
+		Description: strings.TrimSpace(r.FormValue("description")),
+		Enabled:     r.FormValue("enabled") == "on",
+		InputDir:    src.InputDir,
+		OutputDir:   src.OutputDir,
+		Input:       parseFormatSpec(r, "input"),
+		Output:      parseFormatSpec(r, "output"),
+		Transform:   parseTransform(r),
+		Source:      src,
+		Archive:     parseArchive(r),
+		CreatedBy:   "operator",
 	}
 	// Catch a bad member glob here rather than at 3am: an unparseable pattern is
 	// only discovered when files arrive, and it quarantines every one of them.
 	if err := validateFormatSpec(p.Input); err != nil {
-		s.badRequest(w, err)
-		return
+		return store.Pipeline{}, err
 	}
-	// Destinations (TS 07 §7.2) and consolidation (§7.3.2). Each destination carries
-	// its OWN output structure, so the pipeline-level transform is just the fallback
-	// the preview and upload paths use.
-	outs, oerr := parseOutputs(r)
-	if oerr != nil {
-		s.badRequest(w, oerr)
-		return
+	outs, err := parseOutputs(r)
+	if err != nil {
+		return store.Pipeline{}, err
 	}
 	p.Outputs = outs
 	p.Batch = parseBatch(r)
@@ -99,19 +160,35 @@ func (s *Server) handlePipelineCreate(w http.ResponseWriter, r *http.Request) {
 		if p.Outputs[0].Transform != nil {
 			p.Transform = *p.Outputs[0].Transform
 		}
-		// Input and outputs must AGREE: a destination that draws from an input field
-		// which is not declared would emit that column as null forever, silently.
-		if err := store.ValidatePipeline(p); err != nil {
-			s.badRequest(w, err)
-			return
-		}
 	} else if hasDestinationRows(r) {
-		s.badRequest(w, fmt.Errorf("every output destination needs a name"))
+		return store.Pipeline{}, fmt.Errorf("every output destination needs a name")
+	}
+	// Input and outputs must AGREE: a destination that draws from an input field
+	// which is not declared would emit that column as null forever, silently.
+	if len(p.Outputs) > 0 {
+		if err := store.ValidatePipeline(p); err != nil {
+			return store.Pipeline{}, err
+		}
+	}
+	return p, nil
+}
+
+func (s *Server) handlePipelineCreate(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		s.fail(w, err)
 		return
 	}
-	id, err := s.store.CreatePipeline(r.Context(), p)
+	p, err := s.pipelineFromForm(r)
 	if err != nil {
-		s.fail(w, err)
+		s.badRequest(w, err)
+		return
+	}
+	if p.Name == "" {
+		p.Name = "pipeline-" + time.Now().Format("150405")
+	}
+	id, cerr := s.store.CreatePipeline(r.Context(), p)
+	if cerr != nil {
+		s.fail(w, cerr)
 		return
 	}
 	// Pre-create the lifecycle directory tree for a filesystem-backed pipeline so

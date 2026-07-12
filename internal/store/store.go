@@ -25,10 +25,15 @@ var ErrDuplicate = errors.New("file already processed")
 // schema it spans PL_PIPELINE + PLV_PIPELINE_VERSION (+ SRC/FD/TR/DS rows); the
 // alpha keeps the composed spec together for editing convenience.
 type Pipeline struct {
-	ID        int64
-	SrcUID    int64 // published SRC_SOURCE row for this pipeline (for file claims)
-	Name      string
-	Enabled   bool
+	ID     int64
+	SrcUID int64 // published SRC_SOURCE row for this pipeline (for file claims)
+	Name   string
+	// Description is the operator's own note about what this pipeline is for. It is
+	// the only free-text column on the list page, because a pipeline's shape (its
+	// formats, its transform) is no longer summarisable in a column once it can have
+	// several destinations, each with a different one.
+	Description string
+	Enabled     bool
 	InputDir  string
 	OutputDir string
 	Input     spec.FormatSpec
@@ -150,6 +155,7 @@ type Store interface {
 	ListPipelines(ctx context.Context) ([]Pipeline, error)
 	GetPipeline(ctx context.Context, id int64) (Pipeline, error)
 	CreatePipeline(ctx context.Context, p Pipeline) (int64, error)
+	UpdatePipeline(ctx context.Context, p Pipeline) error
 	SetPipelineEnabled(ctx context.Context, id int64, enabled bool) error
 
 	// Datasources (reusable named storage connections, selected by pipelines)

@@ -36,19 +36,22 @@ type destForm struct {
 	Compress bool `json:"compress"`
 
 	// PassThrough + Fields are THIS destination's output structure.
-	PassThrough bool `json:"passThrough"`
-	Fields      []struct {
-		Output string   `json:"output"`
-		Kind   string   `json:"kind"` // field | const | concat
-		Source string   `json:"source"`
-		Const  string   `json:"const"`
-		Parts  []string `json:"parts"`
-		Sep    string   `json:"sep"`
-		Type   string   `json:"type"`
-	} `json:"fields"`
+	PassThrough bool            `json:"passThrough"`
+	Fields      []destFormField `json:"fields"`
 
 	Table  string `json:"table"`
 	DBMode string `json:"dbMode"`
+}
+
+// destFormField is one output field of a destination, as the editor round-trips it.
+type destFormField struct {
+	Output string   `json:"output"`
+	Kind   string   `json:"kind"` // field | const | concat
+	Source string   `json:"source"`
+	Const  string   `json:"const"`
+	Parts  []string `json:"parts"`
+	Sep    string   `json:"sep"`
+	Type   string   `json:"type"`
 }
 
 // parseOutputs reads the wizard's destination rows. Each row posts one hidden

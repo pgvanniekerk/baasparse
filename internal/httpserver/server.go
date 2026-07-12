@@ -81,6 +81,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /pipelines/new", s.handlePipelineNew)
 	mux.HandleFunc("POST /pipelines", s.handlePipelineCreate)
 	mux.HandleFunc("GET /pipelines/{id}", s.handlePipelineDetail)
+	mux.HandleFunc("GET /pipelines/{id}/edit", s.handlePipelineEdit)
+	mux.HandleFunc("POST /pipelines/{id}", s.handlePipelineUpdate)
 	mux.HandleFunc("POST /pipelines/{id}/run", s.handlePipelineRun)
 	mux.HandleFunc("POST /pipelines/{id}/toggle", s.handlePipelineToggle)
 	mux.HandleFunc("POST /preview", s.handlePreview)

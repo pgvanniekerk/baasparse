@@ -15,7 +15,9 @@
 
   <section class="grid2">
     <div class="card">
-      <div class="card-head"><h2>Configuration</h2></div>
+      <div class="card-head"><h2>Configuration</h2>
+        <a class="btn small primary" href="/pipelines/{{.Data.Pipeline.ID}}/edit">Edit pipeline</a>
+      </div>
       <dl class="kv">
         <dt>Input</dt><dd>{{upper $p.Input.Kind}}{{if $p.Input.DSV}} · delim <span class="mono">{{$p.Input.DSV.Delimiter}}</span>{{if $p.Input.DSV.HasHeader}} · header{{end}}{{end}}{{if $p.Input.JSON}} · {{$p.Input.JSON.Mode}}{{end}}</dd>
         <dt>Output</dt><dd>{{upper $p.Output.Kind}}{{if $p.Output.JSON}} · {{$p.Output.JSON.Mode}}{{end}}{{if $p.Output.DSV}} · delim <span class="mono">{{$p.Output.DSV.Delimiter}}</span>{{end}}</dd>
