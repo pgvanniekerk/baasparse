@@ -201,6 +201,23 @@
     setVal('textarea[name="description"]', m.description);
     setChecked('input[name="enabled"]', m.enabled);
     setVal('select[name="disposition"]', m.disposition);
+    if (m.pollSeconds) setVal('input[name="poll_seconds"]', m.pollSeconds);
+
+    // Archiving. The editor renders the whole wizard, so a setting not restored here
+    // is posted back EMPTY and silently erases what was stored.
+    var a = m.archive || {};
+    setChecked('input[name="archive_enabled"]', a.enabled);
+    var ab = qs("#archive-body");
+    if (ab) ab.hidden = !a.enabled;
+    if (a.ageDays) setVal('input[name="archive_age_days"]', a.ageDays);
+    setVal('select[name="archive_compression"]', a.compression);
+    if (a.scheduleSeconds) setVal('input[name="archive_schedule_seconds"]', a.scheduleSeconds);
+    setChecked('input[name="archive_include_quarantined"]', a.includeQuarantined);
+    if (a.destBackend) {
+      setVal('select[name="archive_dest_backend"]', a.destBackend);
+      toggleAttr("archdest", a.destBackend);
+    }
+    setVal('input[name="archive_dest_root"]', a.destRoot);
 
     // datasources (the picker writes a hidden id + a label)
     if (m.datasourceID) selectDs("input", m.datasourceID);

@@ -25,6 +25,20 @@ type wizardModel struct {
 	OutputDatasourceID int64  `json:"outputDatasourceID"`
 	OutputBucket       string `json:"outputBucket"`
 	Disposition        string `json:"disposition"`
+	PollSeconds        int    `json:"pollSeconds"`
+
+	// Archive is restored too. The editor renders the WHOLE wizard, so anything the
+	// model forgets comes back empty on save and silently erases what was stored —
+	// a pipeline would quietly stop archiving and nothing would say so.
+	Archive struct {
+		Enabled            bool   `json:"enabled"`
+		AgeDays            int    `json:"ageDays"`
+		Compression        string `json:"compression"`
+		ScheduleSeconds    int    `json:"scheduleSeconds"`
+		IncludeQuarantined bool   `json:"includeQuarantined"`
+		DestBackend        string `json:"destBackend"`
+		DestRoot           string `json:"destRoot"`
+	} `json:"archive"`
 
 	Input struct {
 		Kind       string `json:"kind"`
@@ -64,6 +78,16 @@ func buildWizardModel(p store.Pipeline) wizardModel {
 	m.OutputDatasourceID = p.Source.OutputDatasourceID
 	m.OutputBucket = p.Source.OutputBucket
 	m.Disposition = p.Source.Disposition
+	m.PollSeconds = p.Source.PollSeconds
+	if a := p.Archive; a != nil {
+		m.Archive.Enabled = a.Enabled
+		m.Archive.AgeDays = a.AgeDays
+		m.Archive.Compression = a.Compression
+		m.Archive.ScheduleSeconds = a.ScheduleSeconds
+		m.Archive.IncludeQuarantined = a.IncludeQuarantined
+		m.Archive.DestBackend = a.Dest.Backend
+		m.Archive.DestRoot = a.Dest.Root
+	}
 
 	m.Input.Kind = string(p.Input.Kind)
 	if p.Input.DSV != nil {
