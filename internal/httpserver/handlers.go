@@ -99,7 +99,9 @@ func (s *Server) handlePipelineCreate(w http.ResponseWriter, r *http.Request) {
 		if p.Outputs[0].Transform != nil {
 			p.Transform = *p.Outputs[0].Transform
 		}
-		if err := store.ValidateOutputs(p.Outputs); err != nil {
+		// Input and outputs must AGREE: a destination that draws from an input field
+		// which is not declared would emit that column as null forever, silently.
+		if err := store.ValidatePipeline(p); err != nil {
 			s.badRequest(w, err)
 			return
 		}
